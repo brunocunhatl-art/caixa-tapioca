@@ -1,30 +1,23 @@
-# Verbo Hub V6 - Supabase Online
+# Verbo Hub Painel/Caixa com Supabase
 
-Versão com sincronização entre celular, tablet e computador usando Supabase.
+Esta versão continua funcionando como painel de controle/balcão e agora lê/grava pedidos na tabela `orders` do Supabase.
 
-## Antes de publicar
+## Como sincronizar com o cardápio digital
 
-No Supabase:
-
-1. Abra o projeto.
-2. Vá em SQL Editor.
-3. Cole o conteúdo do arquivo `supabase.sql`.
-4. Clique em Run.
-
-Na Vercel, adicione as variáveis:
+Use o mesmo projeto Supabase do cardápio digital e configure na Vercel:
 
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_ANON_KEY`
 
 Depois faça Redeploy.
 
-## O que sincroniza
+## Deploy na Vercel
 
-- Pedidos
-- Produtos e categorias
-- Adicionais
-- Abertura/fechamento da loja
-- Valores de caixa
-- Financeiro do dia
+- Framework: Vite
+- Install command: `npm install`
+- Build command: `npm run build`
+- Output directory: `dist`
 
-Se o Supabase não estiver configurado, o sistema continua funcionando localmente no navegador.
+## Observação
+
+Se as variáveis do Supabase não forem configuradas, o sistema continua em modo local usando o navegador.

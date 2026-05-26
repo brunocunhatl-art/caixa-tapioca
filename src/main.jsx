@@ -1,35 +1,20 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
-const BRL = v => (Number(v)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
-const today = () => new Date().toLocaleDateString('pt-BR');
-const uid = () => Date.now()+Math.random();
+
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
-const CLOUD_TABLE = 'verbohub_state';
+
+const BRL = v => (Number(v)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
+const today = () => new Date().toLocaleDateString('pt-BR');
+const uid = () => Date.now()+Math.random();
 const store = {
   get(k,d){ try{return JSON.parse(localStorage.getItem(k)) ?? d}catch{return d} },
   set(k,v){ localStorage.setItem(k,JSON.stringify(v)); }
 };
-async function cloudSet(key, value){
-  if(!supabase) return;
-  const { error } = await supabase.from(CLOUD_TABLE).upsert({ key, value, updated_at: new Date().toISOString() });
-  if(error) console.warn('Supabase salvar:', error.message);
-}
-async function cloudGet(key){
-  if(!supabase) return undefined;
-  const { data, error } = await supabase.from(CLOUD_TABLE).select('value').eq('key', key).maybeSingle();
-  if(error) { console.warn('Supabase carregar:', error.message); return undefined; }
-  return data?.value;
-}
-async function cloudSeedIfEmpty(key, value){
-  if(!supabase) return;
-  const current = await cloudGet(key);
-  if(current === undefined || current === null) await cloudSet(key, value);
-}
 
 const seedProducts = [
  ['Burgers','X-Burger',21.9],['Burgers','X-Salada',26.9],['Burgers','X-Bacon',28.9],['Burgers','X-Egg Bacon',30.9],['Burgers','Duplo Bacon BBQ 🔥',35.9],['Burgers','X-Tudo',37.9],
@@ -45,6 +30,96 @@ const seedAdds = [
  ['Carne Seca',10],['Carne',8],['Frango',8],['Mussarela',5],['Presunto',5],['Ovo',5],['Bacon',5],['Requeijão',5],['Catupiry',5],['Rúcula',5],['Queijo Coalho',5],['Calabresa',5],['Tomate',5],['Milho',5]
 ].map((a,i)=>({id:i+1,name:a[0],price:a[1]}));
 
+function normalizePaymentName(method){
+  const m = String(method||'').toLowerCase();
+  if(m.includes('pix')) return 'Pix';
+  if(m.includes('dinheiro')) return 'Dinheiro';
+  if(m.includes('credito') || m.includes('crédito')) return 'Crédito';
+  if(m.includes('debito') || m.includes('débito')) return 'Débito';
+  return method || 'Pix';
+}
+function itemFromSupabase(i){
+  const qty = Number(i.qty)||1;
+  const addons = i.addons || i.adds || [];
+  const included = i.included || [];
+  const addText = [
+    included.length ? `Inclusos: ${included.join(', ')}` : '',
+    addons.length ? `Extras: ${addons.map(a=>a.name||a).join(', ')}` : '',
+    i.observation || i.obs ? `Obs: ${i.observation || i.obs}` : ''
+  ].filter(Boolean).join(' | ');
+  return {
+    uid: i.uid || uid(),
+    qty,
+    product: {
+      id: i.id || i.product?.id || uid(),
+      name: i.name || i.product?.name || 'Produto',
+      cat: i.category || i.product?.cat || 'Cardápio online',
+      price: Number(i.basePrice ?? i.price ?? i.product?.price ?? 0)
+    },
+    adds: addons.map((a,idx)=>({ id:a.id || idx+1, name:a.name || String(a), price:Number(a.price)||0 })),
+    included,
+    obs: addText
+  };
+}
+function orderFromSupabase(row, index=0){
+  const customer = row.customer || {};
+  const customerName = typeof customer === 'string' ? customer : [customer.name, customer.phone].filter(Boolean).join(' • ');
+  return {
+    id: row.id,
+    supabaseId: row.id,
+    num: row.order_number || row.num || (index+1),
+    date: row.created_at || row.date || new Date().toISOString(),
+    customer: customerName || 'Cliente online',
+    customerData: customer,
+    items: (row.items||[]).map(itemFromSupabase),
+    obs: [
+      row.order_type ? `Tipo: ${row.order_type}` : '',
+      customer.address ? `Endereço: ${customer.address}` : '',
+      customer.reference ? `Referência: ${customer.reference}` : '',
+      row.payment_method ? `Pagamento: ${normalizePaymentName(row.payment_method)}` : '',
+      row.change_for ? `Troco para: ${row.change_for}` : ''
+    ].filter(Boolean).join(' | '),
+    status: row.status || 'novo',
+    discount: Number(row.discount)||0,
+    extra: Number(row.extra)||0,
+    payments: row.payment_method ? [{method: normalizePaymentName(row.payment_method), value: Number(row.total)||0}] : [],
+    fiado: !!row.fiado,
+    totalFromSupabase: Number(row.total)||0,
+    source: row.source || 'supabase'
+  };
+}
+function orderToSupabase(o){
+  return {
+    customer: { name:o.customer || 'Cliente balcão' },
+    items: (o.items||[]).map(i=>({
+      uid:i.uid,
+      id:i.product?.id,
+      name:i.product?.name,
+      category:i.product?.cat,
+      basePrice:Number(i.product?.price)||0,
+      qty:Number(i.qty)||1,
+      addons:i.adds||[],
+      included:i.included||[],
+      observation:i.obs||'',
+      total:calcItem(i)
+    })),
+    subtotal: (o.items||[]).reduce((s,i)=>s+calcItem(i),0),
+    delivery_fee:0,
+    total: calcOrder(o),
+    payment_method: o.payments?.[0]?.method || null,
+    order_type:'balcao',
+    source:'verbo-hub-painel',
+    status:o.status || 'aberto'
+  };
+}
+async function fetchSupabaseOrders(){
+  if(!supabase) return null;
+  const {data,error}=await supabase.from('orders').select('*').order('created_at',{ascending:false}).limit(200);
+  if(error){ console.error(error); return null; }
+  return (data||[]).map(orderFromSupabase);
+}
+
+
 
 function receiptStyle(){return `<style>
 @page{size:80mm auto;margin:0}
@@ -55,13 +130,13 @@ function orderReceipt(o,total){return `<div class="receipt80"><div class="r-cent
 function financeReceipt({categoryRows,methodsRows,cashOpen,dinheiroRecebido,dinheiroEsperado,cashClose,diferenca,total,canceled,fiado,done}){return `<div class="receipt80"><div class="r-center"><img class="r-logo" src="/logo-verbohub.jpeg"/><div class="r-title">VERBO HUB</div><div class="r-sub">FECHAMENTO DO DIA • ${today()}</div></div><div class="r-line"></div><div class="r-row"><b>Pedidos concluídos</b><span>${done.length}</span></div><div class="r-row"><b>Pedidos cancelados</b><span>${canceled}</span></div>${moneyLine('Fiado em aberto',fiado)}<div class="r-line"></div><div class="r-bold">VENDAS POR CATEGORIA</div>${categoryRows.map(r=>`<div class="r-row"><span>${r.label}</span><b>${r.qtd} un • ${BRL(r.valor)}</b></div>`).join('')}<div class="r-line"></div><div class="r-bold">FORMAS DE PAGAMENTO</div>${methodsRows.map(r=>moneyLine(r.method,r.value)).join('')}<div class="r-line"></div><div class="r-bold">CAIXA EM DINHEIRO</div>${moneyLine('Abertura',cashOpen)}${moneyLine('Dinheiro recebido',dinheiroRecebido)}${moneyLine('Fechamento esperado',dinheiroEsperado)}${moneyLine('Fechamento informado',cashClose)}${moneyLine('Diferença',diferenca)}<div class="r-total">TOTAL DO DIA ${BRL(total)}</div><div class="r-footer">Relatório gerado pelo sistema Verbo Hub</div></div>`}
 
 function calcItem(item){
+  const qty = Number(item.qty)||1;
   const base = Number(item.product.price)||0;
   const adds = item.adds || [];
   const isCuscuzBase = item.product.name.toLowerCase().includes('cuscuz base');
   const isCuscuzPremium = item.product.name.toLowerCase().includes('cuscuz premium');
-  if(isCuscuzBase) return base + adds.slice(4).reduce((s,a)=>s+Number(a.price),0);
-  if(isCuscuzPremium) return base + adds.reduce((s,a)=>s+Number(a.price),0);
-  return base + adds.reduce((s,a)=>s+Number(a.price),0);
+  const unit = isCuscuzBase ? base + adds.slice(4).reduce((s,a)=>s+Number(a.price),0) : base + adds.reduce((s,a)=>s+Number(a.price),0);
+  return unit * qty;
 }
 function calcOrder(o){return Math.max(0,(o.items||[]).reduce((s,i)=>s+calcItem(i),0)+(Number(o.extra)||0)-(Number(o.discount)||0));}
 
@@ -70,72 +145,63 @@ function App(){
  const [products,setProducts]=useState(()=>store.get('vh_products_v3',seedProducts));
  const [adds,setAdds]=useState(()=>store.get('vh_adds_v3',seedAdds));
  const [orders,setOrders]=useState(()=>store.get('vh_orders_v3',[]));
+ const [syncStatus,setSyncStatus]=useState(supabase?'Conectando ao Supabase...':'Modo local: configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para sincronizar.');
+ const beepRef=useRef(null);
  const [open,setOpen]=useState(()=>store.get('vh_store_open',false));
  const [cashOpen,setCashOpen]=useState(()=>store.get('vh_cash_open',0));
  const [cashClose,setCashClose]=useState(()=>store.get('vh_cash_close',0));
  const [cart,setCart]=useState([]); const [customer,setCustomer]=useState(''); const [obs,setObs]=useState('');
  const cats=useMemo(()=>[...new Set(products.map(p=>p.cat))], [products]);
- useEffect(()=>{
-   let mounted = true;
-   async function loadCloud(){
-     if(!supabase) return;
-     await cloudSeedIfEmpty('vh_products_v3', seedProducts);
-     await cloudSeedIfEmpty('vh_adds_v3', seedAdds);
-     await cloudSeedIfEmpty('vh_orders_v3', []);
-     const [cp,ca,co,copen,ccashOpen,ccashClose] = await Promise.all([
-       cloudGet('vh_products_v3'), cloudGet('vh_adds_v3'), cloudGet('vh_orders_v3'),
-       cloudGet('vh_store_open'), cloudGet('vh_cash_open'), cloudGet('vh_cash_close')
-     ]);
-     if(!mounted) return;
-     if(cp) { setProducts(cp); store.set('vh_products_v3', cp); }
-     if(ca) { setAdds(ca); store.set('vh_adds_v3', ca); }
-     if(co) { setOrders(co); store.set('vh_orders_v3', co); }
-     if(typeof copen === 'boolean') { setOpen(copen); store.set('vh_store_open', copen); }
-     if(ccashOpen !== undefined && ccashOpen !== null) { setCashOpen(Number(ccashOpen)||0); store.set('vh_cash_open', Number(ccashOpen)||0); }
-     if(ccashClose !== undefined && ccashClose !== null) { setCashClose(Number(ccashClose)||0); store.set('vh_cash_close', Number(ccashClose)||0); }
-   }
-   loadCloud();
-   const channel = supabase?.channel('verbohub-state-sync')
-     .on('postgres_changes', { event: '*', schema: 'public', table: CLOUD_TABLE }, payload => {
-       const row = payload.new;
-       if(!row) return;
-       store.set(row.key, row.value);
-       if(row.key==='vh_products_v3') setProducts(row.value || seedProducts);
-       if(row.key==='vh_adds_v3') setAdds(row.value || seedAdds);
-       if(row.key==='vh_orders_v3') setOrders(row.value || []);
-       if(row.key==='vh_store_open') setOpen(Boolean(row.value));
-       if(row.key==='vh_cash_open') setCashOpen(Number(row.value)||0);
-       if(row.key==='vh_cash_close') setCashClose(Number(row.value)||0);
-     }).subscribe();
-   return ()=>{ mounted=false; if(channel) supabase.removeChannel(channel); };
- }, []);
- const saveOrders=v=>{setOrders(v);store.set('vh_orders_v3',v);cloudSet('vh_orders_v3',v)};
- const saveProducts=v=>{setProducts(v);store.set('vh_products_v3',v);cloudSet('vh_products_v3',v)};
- const saveAdds=v=>{setAdds(v);store.set('vh_adds_v3',v);cloudSet('vh_adds_v3',v)};
+ const saveOrders=v=>{setOrders(v);store.set('vh_orders_v3',v)};
+ const refreshOrders=async()=>{ const remote=await fetchSupabaseOrders(); if(remote){ saveOrders(remote); setSyncStatus('Sincronizado com Supabase'); } };
+ useEffect(()=>{ refreshOrders(); if(!supabase) return; const ch=supabase.channel('orders-painel-verbohub').on('postgres_changes',{event:'*',schema:'public',table:'orders'}, payload=>{ refreshOrders(); if(payload.eventType==='INSERT'){ try{beepRef.current?.play()}catch(e){} } }).subscribe(); return()=>supabase.removeChannel(ch); },[]);
+ const saveProducts=v=>{setProducts(v);store.set('vh_products_v3',v)};
+ const saveAdds=v=>{setAdds(v);store.set('vh_adds_v3',v)};
  const setOpenStore=v=>{
-   if(v){ const val=prompt('Com quanto em dinheiro está abrindo a loja?','0'); if(val===null) return; const n=Number(String(val).replace(',','.'))||0; setCashOpen(n); store.set('vh_cash_open',n); cloudSet('vh_cash_open',n); setCashClose(0); store.set('vh_cash_close',0); cloudSet('vh_cash_close',0); }
-   else { const val=prompt('Quanto tem em dinheiro no caixa ao fechar?','0'); if(val===null) return; const n=Number(String(val).replace(',','.'))||0; setCashClose(n); store.set('vh_cash_close',n); cloudSet('vh_cash_close',n); }
-   setOpen(v);store.set('vh_store_open',v);cloudSet('vh_store_open',v)
+   if(v){ const val=prompt('Com quanto em dinheiro está abrindo a loja?','0'); if(val===null) return; setCashOpen(Number(String(val).replace(',','.'))||0); store.set('vh_cash_open',Number(String(val).replace(',','.'))||0); setCashClose(0); store.set('vh_cash_close',0); }
+   else { const val=prompt('Quanto tem em dinheiro no caixa ao fechar?','0'); if(val===null) return; setCashClose(Number(String(val).replace(',','.'))||0); store.set('vh_cash_close',Number(String(val).replace(',','.'))||0); }
+   setOpen(v);store.set('vh_store_open',v)
  };
  const addProduct=p=>setCart([...cart,{uid:uid(),product:p,adds:[],obs:''}]);
  const toggleAdd=(id,a)=>setCart(cart.map(i=>i.uid===id?{...i,adds:i.adds.find(x=>x.id===a.id)?i.adds.filter(x=>x.id!==a.id):[...i.adds,a]}:i));
  const subtotal=cart.reduce((s,i)=>s+calcItem(i),0);
- const createOrder=()=>{ if(!cart.length) return alert('Adicione produtos ao pedido.'); const o={id:uid(),num:orders.length+1,date:new Date().toISOString(),customer:customer||'Cliente balcão',items:cart,obs,status:'aberto',discount:0,extra:0,payments:[],fiado:false}; saveOrders([o,...orders]); setCart([]); setCustomer(''); setObs(''); setTab('pedidos'); };
- const update=(id,patch)=>saveOrders(orders.map(o=>o.id===id?{...o,...patch}:o));
+ const createOrder=async()=>{ 
+   if(!cart.length) return alert('Adicione produtos ao pedido.'); 
+   const o={id:uid(),num:orders.length+1,date:new Date().toISOString(),customer:customer||'Cliente balcão',items:cart,obs,status:'aberto',discount:0,extra:0,payments:[],fiado:false}; 
+   if(supabase){
+     const {error}=await supabase.from('orders').insert(orderToSupabase(o));
+     if(error){ alert('Erro ao salvar no Supabase: '+error.message); return; }
+     await refreshOrders();
+   } else {
+     saveOrders([o,...orders]);
+   }
+   setCart([]); setCustomer(''); setObs(''); setTab('pedidos'); 
+ };
+ const update=async(id,patch)=>{
+   const next=orders.map(o=>o.id===id?{...o,...patch}:o);
+   saveOrders(next);
+   if(supabase){
+     const current=next.find(o=>o.id===id);
+     const payload={status:current.status, discount:Number(current.discount)||0, extra:Number(current.extra)||0, fiado:!!current.fiado};
+     if(current.payments) payload.payment_method=current.payments[0]?.method || null;
+     const {error}=await supabase.from('orders').update(payload).eq('id',id);
+     if(error) alert('Erro ao atualizar no Supabase: '+error.message);
+   }
+ };
  const cancel=id=>confirm('Cancelar este pedido?')&&update(id,{status:'cancelado'});
  const day=orders.filter(o=>new Date(o.date).toLocaleDateString('pt-BR')===today());
  const done=day.filter(o=>o.status==='concluido');
  return <div className="app">
-  <header className="top"><img src="/logo-verbohub.jpeg"/><div><h1>Verbo Hub</h1><p>{open?'🟢 Loja aberta':'🔴 Loja fechada'} • {today()}</p></div><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></header>
+  <audio ref={beepRef} src="/pedido.wav" preload="auto"></audio><header className="top"><img src="/logo-verbohub.jpeg"/><div><h1>Verbo Hub</h1><p>{open?'🟢 Loja aberta':'🔴 Loja fechada'} • {today()} • {syncStatus}</p></div><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></header>
   <nav>{[['novo','Novo pedido'],['pedidos','Pedidos'],['financeiro','Financeiro'],['cardapio','Cardápio']].map(t=><button key={t[0]} className={tab===t[0]?'on':''} onClick={()=>setTab(t[0])}>{t[1]}</button>)}</nav>
   {tab==='novo'&&<main className="layout"><section className="panel"><h2>Novo pedido</h2><div className="formline"><input placeholder="Nome do cliente / mesa" value={customer} onChange={e=>setCustomer(e.target.value)}/><textarea placeholder="Observação geral" value={obs} onChange={e=>setObs(e.target.value)}/></div><div className="catalog">{cats.map(c=><div className="cat" key={c}><h3>{c}</h3>{products.filter(p=>p.cat===c&&p.active).map(p=><button className="product" key={p.id} onClick={()=>addProduct(p)}><span>{p.name}</span><b>{BRL(p.price)}</b></button>)}</div>)}</div></section><section className="panel ticket"><h2>Pedido atual</h2>{cart.length===0&&<p className="muted">Escolha os produtos do cardápio.</p>}{cart.map(i=><div className="cartitem" key={i.uid}><div className="row"><b>{i.product.name}</b><button className="ghost dangerText" onClick={()=>setCart(cart.filter(x=>x.uid!==i.uid))}>remover</button></div>{i.product.name.toLowerCase().includes('cuscuz base')&&<small>{Math.min(i.adds.length,4)}/4 adicionais grátis • depois cobra automático</small>}{i.product.name.toLowerCase().includes('cuscuz premium')&&<small>Premium: todos os adicionais são cobrados</small>}<div className="chips">{adds.map(a=><button key={a.id} className={i.adds.find(x=>x.id===a.id)?'chip on':'chip'} onClick={()=>toggleAdd(i.uid,a)}>{a.name} {i.product.name.toLowerCase().includes('cuscuz base')?'':`+ ${BRL(a.price)}`}</button>)}</div><b className="totalitem">{BRL(calcItem(i))}</b></div>)}<h2>Total: {BRL(subtotal)}</h2><button className="primary big" onClick={createOrder}>Salvar como pedido aberto</button></section></main>}
   {tab==='pedidos'&&<main className="orders">{orders.length===0&&<section className="panel"><h2>Nenhum pedido ainda</h2></section>}{orders.map(o=><Order key={o.id} o={o} update={update} cancel={cancel}/>)}</main>}
-  {tab==='financeiro'&&<Financeiro day={day} done={done} orders={orders} open={open} setOpenStore={setOpenStore} cashOpen={cashOpen} cashClose={cashClose} setCashOpen={v=>{setCashOpen(v);store.set('vh_cash_open',v);cloudSet('vh_cash_open',v)}} setCashClose={v=>{setCashClose(v);store.set('vh_cash_close',v);cloudSet('vh_cash_close',v)}}/>} 
+  {tab==='financeiro'&&<Financeiro day={day} done={done} orders={orders} open={open} setOpenStore={setOpenStore} cashOpen={cashOpen} cashClose={cashClose} setCashOpen={v=>{setCashOpen(v);store.set('vh_cash_open',v)}} setCashClose={v=>{setCashClose(v);store.set('vh_cash_close',v)}}/>} 
   {tab==='cardapio'&&<Cardapio products={products} saveProducts={saveProducts} adds={adds} saveAdds={saveAdds}/>} 
  </div>;
 }
 
-function Order({o,update,cancel}){const[discount,setDiscount]=useState(o.discount||0),[extra,setExtra]=useState(o.extra||0),[pays,setPays]=useState(o.payments?.length?o.payments:[{method:'Pix',value:''}]); const total=calcOrder({...o,discount,extra,payments:pays}); const paid=pays.reduce((s,p)=>s+Number(p.value||0),0); const save=patch=>update(o.id,{discount:Number(discount)||0,extra:Number(extra)||0,payments:pays,...patch}); return <section className={'panel order '+o.status}><div className="row"><h2>#{o.num} • {o.customer}</h2><span className="badge">{o.status}</span></div>{o.items.map((i,k)=><p key={k}><b>{i.product.name}</b>{i.adds.length?` + ${i.adds.map(a=>a.name).join(', ')}`:''} — {BRL(calcItem(i))}</p>)}{o.obs&&<p className="muted">Obs: {o.obs}</p>}<div className="checkout"><label>Desconto R$<input type="number" value={discount} onChange={e=>setDiscount(e.target.value)}/></label><label>Valor extra R$<input type="number" value={extra} onChange={e=>setExtra(e.target.value)}/></label><label className="check"><input type="checkbox" checked={o.fiado} onChange={e=>update(o.id,{fiado:e.target.checked})}/> Fiado</label></div><h2>Total: {BRL(total)}</h2><h3>Pagamento dividido</h3>{pays.map((p,idx)=><div className="pay" key={idx}><select value={p.method} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,method:e.target.value}:x))}><option>Pix</option><option>Débito</option><option>Crédito</option><option>Dinheiro</option></select><input type="number" placeholder="valor" value={p.value} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,value:e.target.value}:x))}/></div>)}<button className="ghost" onClick={()=>setPays([...pays,{method:'Pix',value:''}])}>+ forma de pagamento</button><p className={paid>=total?'ok':'warn'}>Pago: {BRL(paid)} • Falta: {BRL(Math.max(0,total-paid))}</p><div className="actions"><button onClick={()=>save({status:'aberto'})}>Aberto</button><button onClick={()=>save({status:'aguardando pagamento'})}>Aguardando</button><button className="primary" onClick={()=>save({status:'concluido'})}>Concluir</button><button onClick={()=>openPrint(orderReceipt({...o,discount:Number(discount)||0,extra:Number(extra)||0,payments:pays}, total))}>Imprimir pedido 80mm</button><button className="danger" onClick={()=>cancel(o.id)}>Cancelar</button></div></section>}
+function Order({o,update,cancel}){const[discount,setDiscount]=useState(o.discount||0),[extra,setExtra]=useState(o.extra||0),[pays,setPays]=useState(o.payments?.length?o.payments:[{method:'Pix',value:''}]); const total=calcOrder({...o,discount,extra,payments:pays}); const paid=pays.reduce((s,p)=>s+Number(p.value||0),0); const save=patch=>update(o.id,{discount:Number(discount)||0,extra:Number(extra)||0,payments:pays,...patch}); return <section className={'panel order '+o.status}><div className="row"><h2>#{o.num} • {o.customer}</h2><span className="badge">{o.status}</span></div>{o.items.map((i,k)=><p key={k}><b>{i.qty||1}x {i.product.name}</b>{i.adds.length?` + ${i.adds.map(a=>a.name).join(', ')}`:''}{i.obs?` • ${i.obs}`:''} — {BRL(calcItem(i))}</p>)}{o.obs&&<p className="muted">Obs: {o.obs}</p>}<div className="checkout"><label>Desconto R$<input type="number" value={discount} onChange={e=>setDiscount(e.target.value)}/></label><label>Valor extra R$<input type="number" value={extra} onChange={e=>setExtra(e.target.value)}/></label><label className="check"><input type="checkbox" checked={o.fiado} onChange={e=>update(o.id,{fiado:e.target.checked})}/> Fiado</label></div><h2>Total: {BRL(total)}</h2><h3>Pagamento dividido</h3>{pays.map((p,idx)=><div className="pay" key={idx}><select value={p.method} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,method:e.target.value}:x))}><option>Pix</option><option>Débito</option><option>Crédito</option><option>Dinheiro</option></select><input type="number" placeholder="valor" value={p.value} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,value:e.target.value}:x))}/></div>)}<button className="ghost" onClick={()=>setPays([...pays,{method:'Pix',value:''}])}>+ forma de pagamento</button><p className={paid>=total?'ok':'warn'}>Pago: {BRL(paid)} • Falta: {BRL(Math.max(0,total-paid))}</p><div className="actions"><button onClick={()=>save({status:'aberto'})}>Aberto</button><button onClick={()=>save({status:'aguardando pagamento'})}>Aguardando</button><button className="primary" onClick={()=>save({status:'concluido'})}>Concluir</button><button onClick={()=>openPrint(orderReceipt({...o,discount:Number(discount)||0,extra:Number(extra)||0,payments:pays}, total))}>Imprimir pedido 80mm</button><button className="danger" onClick={()=>cancel(o.id)}>Cancelar</button></div></section>}
 
 function Financeiro({day,done,orders,open,setOpenStore,cashOpen,cashClose,setCashOpen,setCashClose}){
  const total=done.reduce((sum,o)=>sum+calcOrder(o),0);
