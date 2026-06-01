@@ -77,7 +77,8 @@ function orderFromSupabase(row, index=0){
       customer.address ? `Endereço: ${customer.address}` : '',
       customer.reference ? `Referência: ${customer.reference}` : '',
       row.payment_method ? `Pagamento: ${normalizePaymentName(row.payment_method)}` : '',
-      row.change_for ? `Troco para: ${row.change_for}` : ''
+      row.change_for ? `Troco para: ${row.change_for}` : '',
+      row.coupon?.code ? `Cupom: ${row.coupon.code} (${row.coupon.percent}% off)` : ''
     ].filter(Boolean).join(' | '),
     status: row.status || 'novo',
     discount: Number(row.discount)||0,
@@ -114,12 +115,47 @@ function orderToSupabase(o){
 }
 async function fetchSupabaseOrders(){
   if(!supabase) return null;
-  const {data,error}=await supabase.from('orders').select('*').order('created_at',{ascending:false}).limit(200);
+  const {data,error}=await supabase.from('orders').select('*').order('created_at',{ascending:false}).limit(1000);
   if(error){ console.error(error); return null; }
   return (data||[]).map(orderFromSupabase);
 }
 
 
+
+
+
+function slugify(v){ return String(v||'categoria').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'categoria'; }
+function productFromMenuItem(row){ return { id:row.id, cat:row.category_name || row.cat || 'Cardápio', name:row.name, description:row.description || '', price:Number(row.price)||0, active:row.active !== false, category_id:row.category_id || slugify(row.category_name), icon:row.icon || '🍽️', addons:row.addons ?? null, sort_order:row.sort_order || 0 }; }
+function menuItemFromProduct(p, index=0){ return { id:String(p.id || slugify(p.name)+'-'+Date.now()), category_id:p.category_id || slugify(p.cat), category_name:p.cat || 'Cardápio', icon:p.icon || '🍽️', addons:p.addons ?? null, name:p.name, description:p.description || '', price:Number(p.price)||0, active:p.active !== false, sort_order:Number(p.sort_order ?? index)||0, updated_at:new Date().toISOString() }; }
+async function fetchMenuItems(){ if(!supabase) return null; const {data,error}=await supabase.from('menu_items').select('*').order('sort_order',{ascending:true}).order('created_at',{ascending:true}); if(error){ console.error(error); return null; } return (data||[]).map(productFromMenuItem); }
+async function saveProductRemote(p,index=0){ if(!supabase) return {error:null}; return await supabase.from('menu_items').upsert(menuItemFromProduct(p,index)); }
+async function deleteProductRemote(id){ if(!supabase) return {error:null}; return await supabase.from('menu_items').delete().eq('id',String(id)); }
+async function fetchCoupons(){ if(!supabase) return null; const {data,error}=await supabase.from('coupons').select('*').order('created_at',{ascending:false}); if(error){ console.error(error); return null; } return data||[]; }
+async function saveCouponRemote(c){
+  if(!supabase) return {error:null};
+  const payload={
+    code:String(c.code||c.name||'').trim().toUpperCase(),
+    percent:Number(c.percent)||0,
+    active:c.active!==false
+  };
+  // A tabela cria o UUID sozinha. Isso evita erro quando o painel usa id temporário local.
+  return await supabase.from('coupons').upsert(payload,{onConflict:'code'}).select();
+}
+async function deleteCouponRemote(id){ if(!supabase) return {error:null}; return await supabase.from('coupons').delete().eq('id',id); }
+
+async function fetchStoreSettings(){
+  if(!supabase) return null;
+  const {data,error}=await supabase.from('store_settings').select('*').eq('id','main').maybeSingle();
+  if(error){ console.error(error); return null; }
+  return data;
+}
+async function saveStoreSettings(open, estimated=25, message){
+  if(!supabase) return null;
+  const payload={id:'main', is_open:!!open, estimated_minutes:Number(estimated)||25, message:message || (open?'Estamos recebendo pedidos normalmente.':'Loja fechada no momento.'), updated_at:new Date().toISOString()};
+  const {error}=await supabase.from('store_settings').upsert(payload);
+  if(error) alert('Erro ao salvar loja aberta/fechada: '+error.message);
+  return !error;
+}
 
 function receiptStyle(){return `<style>
 @page{size:80mm auto;margin:0}
@@ -127,7 +163,7 @@ function receiptStyle(){return `<style>
 function openPrint(html){const w=window.open('','_blank','width=420,height=700');w.document.write(`<!doctype html><html><head><title>Impressão Verbo Hub</title>${receiptStyle()}</head><body>${html}<script>window.onload=()=>{setTimeout(()=>window.print(),200)}<\/script></body></html>`);w.document.close();}
 function moneyLine(label,value){return `<div class="r-row"><span>${label}</span><b>${BRL(value)}</b></div>`}
 function orderReceipt(o,total){return `<div class="receipt80"><div class="r-center"><img class="r-logo" src="/logo-verbohub.jpeg"/><div class="r-title">VERBO HUB</div><div class="r-sub">Pedido #${o.num} • ${today()}</div></div><div class="r-line"></div><div class="r-row"><b>Cliente</b><span>${o.customer}</span></div><div class="r-row"><b>Status</b><span>${o.status}</span></div><div class="r-line"></div>${(o.items||[]).map(i=>`<div class="r-item"><div class="r-row"><span class="r-item-title">1x ${i.product.name}</span><b>${BRL(calcItem(i))}</b></div>${(i.adds||[]).length?`<div class="r-add">${i.adds.map(a=>`+ ${a.name}`).join('<br/>')}</div>`:''}${i.obs?`<div class="r-add">Obs item: ${i.obs}</div>`:''}</div>`).join('')}${o.obs?`<div class="r-line"></div><div class="r-bold">OBSERVAÇÃO</div><div>${o.obs}</div>`:''}<div class="r-line"></div>${moneyLine('Desconto',Number(o.discount)||0)}${moneyLine('Valor extra',Number(o.extra)||0)}${(o.payments||[]).map(p=>moneyLine(p.method,Number(p.value)||0)).join('')}<div class="r-total">TOTAL ${BRL(total)}</div><div class="r-footer">Obrigado pela preferência!</div></div>`}
-function financeReceipt({categoryRows,methodsRows,cashOpen,dinheiroRecebido,dinheiroEsperado,cashClose,diferenca,total,canceled,fiado,done}){return `<div class="receipt80"><div class="r-center"><img class="r-logo" src="/logo-verbohub.jpeg"/><div class="r-title">VERBO HUB</div><div class="r-sub">FECHAMENTO DO DIA • ${today()}</div></div><div class="r-line"></div><div class="r-row"><b>Pedidos concluídos</b><span>${done.length}</span></div><div class="r-row"><b>Pedidos cancelados</b><span>${canceled}</span></div>${moneyLine('Fiado em aberto',fiado)}<div class="r-line"></div><div class="r-bold">VENDAS POR CATEGORIA</div>${categoryRows.map(r=>`<div class="r-row"><span>${r.label}</span><b>${r.qtd} un • ${BRL(r.valor)}</b></div>`).join('')}<div class="r-line"></div><div class="r-bold">FORMAS DE PAGAMENTO</div>${methodsRows.map(r=>moneyLine(r.method,r.value)).join('')}<div class="r-line"></div><div class="r-bold">CAIXA EM DINHEIRO</div>${moneyLine('Abertura',cashOpen)}${moneyLine('Dinheiro recebido',dinheiroRecebido)}${moneyLine('Fechamento esperado',dinheiroEsperado)}${moneyLine('Fechamento informado',cashClose)}${moneyLine('Diferença',diferenca)}<div class="r-total">TOTAL DO DIA ${BRL(total)}</div><div class="r-footer">Relatório gerado pelo sistema Verbo Hub</div></div>`}
+function financeReceipt({categoryRows,methodsRows,cashOpen,dinheiroRecebido,dinheiroEsperado,cashClose,diferenca,total,canceled,fiado,done,dateLabel='Hoje',gross=0,discounts=0,ticket=0}){return `<div class="receipt80"><div class="r-center"><img class="r-logo" src="/logo-verbohub.jpeg"/><div class="r-title">VERBO HUB</div><div class="r-sub">FECHAMENTO DE CAIXA • ${dateLabel}</div></div><div class="r-line"></div><div class="r-row"><b>Pedidos concluídos</b><span>${done.length}</span></div><div class="r-row"><b>Pedidos cancelados</b><span>${canceled}</span></div>${moneyLine('Faturamento bruto',gross)}${moneyLine('Descontos',discounts)}${moneyLine('Faturamento líquido',total)}${moneyLine('Ticket médio',ticket)}${moneyLine('Fiado em aberto',fiado)}<div class="r-line"></div><div class="r-bold">VENDAS POR CATEGORIA</div>${categoryRows.map(r=>`<div class="r-row"><span>${r.label}</span><b>${r.qtd} un • ${BRL(r.valor)}</b></div>`).join('')}<div class="r-line"></div><div class="r-bold">FORMAS DE PAGAMENTO</div>${methodsRows.map(r=>moneyLine(r.method,r.value)).join('')}<div class="r-line"></div><div class="r-bold">CAIXA EM DINHEIRO</div>${moneyLine('Abertura',cashOpen)}${moneyLine('Dinheiro recebido',dinheiroRecebido)}${moneyLine('Fechamento esperado',dinheiroEsperado)}${moneyLine('Fechamento informado',cashClose)}${moneyLine('Diferença',diferenca)}<div class="r-total">TOTAL ${BRL(total)}</div><div class="r-footer">Relatório gerado pelo sistema Verbo Hub</div></div>`}
 
 function calcItem(item){
   const qty = Number(item.qty)||1;
@@ -135,7 +171,7 @@ function calcItem(item){
   const adds = item.adds || [];
   const isCuscuzBase = item.product.name.toLowerCase().includes('cuscuz base');
   const isCuscuzPremium = item.product.name.toLowerCase().includes('cuscuz premium');
-  const unit = isCuscuzBase ? base + adds.slice(4).reduce((s,a)=>s+Number(a.price),0) : base + adds.reduce((s,a)=>s+Number(a.price),0);
+  const unit = isCuscuzPremium ? base : (isCuscuzBase ? base + adds.slice(3).reduce((s,a)=>s+Number(a.price),0) : base + adds.reduce((s,a)=>s+Number(a.price),0));
   return unit * qty;
 }
 function calcOrder(o){return Math.max(0,(o.items||[]).reduce((s,i)=>s+calcItem(i),0)+(Number(o.extra)||0)-(Number(o.discount)||0));}
@@ -144,23 +180,28 @@ function App(){
  const [tab,setTab]=useState('novo');
  const [products,setProducts]=useState(()=>store.get('vh_products_v3',seedProducts));
  const [adds,setAdds]=useState(()=>store.get('vh_adds_v3',seedAdds));
+ const [coupons,setCoupons]=useState(()=>store.get('vh_coupons_v1',[]));
  const [orders,setOrders]=useState(()=>store.get('vh_orders_v3',[]));
  const [syncStatus,setSyncStatus]=useState(supabase?'Conectando ao Supabase...':'Modo local: configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para sincronizar.');
  const beepRef=useRef(null);
  const [open,setOpen]=useState(()=>store.get('vh_store_open',false));
+ const [estimatedMinutes,setEstimatedMinutes]=useState(()=>store.get('vh_estimated_minutes',25));
+ const [storeMessage,setStoreMessage]=useState(()=>store.get('vh_store_message','Estamos recebendo pedidos normalmente.'));
  const [cashOpen,setCashOpen]=useState(()=>store.get('vh_cash_open',0));
  const [cashClose,setCashClose]=useState(()=>store.get('vh_cash_close',0));
  const [cart,setCart]=useState([]); const [customer,setCustomer]=useState(''); const [obs,setObs]=useState('');
  const cats=useMemo(()=>[...new Set(products.map(p=>p.cat))], [products]);
  const saveOrders=v=>{setOrders(v);store.set('vh_orders_v3',v)};
- const refreshOrders=async()=>{ const remote=await fetchSupabaseOrders(); if(remote){ saveOrders(remote); setSyncStatus('Sincronizado com Supabase'); } };
- useEffect(()=>{ refreshOrders(); if(!supabase) return; const ch=supabase.channel('orders-painel-verbohub').on('postgres_changes',{event:'*',schema:'public',table:'orders'}, payload=>{ refreshOrders(); if(payload.eventType==='INSERT'){ try{beepRef.current?.play()}catch(e){} } }).subscribe(); return()=>supabase.removeChannel(ch); },[]);
+ const refreshOrders=async()=>{ const remote=await fetchSupabaseOrders(); if(remote){ saveOrders(remote); setSyncStatus('Sincronizado com Supabase'); } const st=await fetchStoreSettings(); if(st){ setOpen(st.is_open!==false); store.set('vh_store_open',st.is_open!==false); setEstimatedMinutes(st.estimated_minutes||25); store.set('vh_estimated_minutes',st.estimated_minutes||25); setStoreMessage(st.message||''); store.set('vh_store_message',st.message||''); } const remoteCoupons=await fetchCoupons(); if(remoteCoupons){ setCoupons(remoteCoupons); store.set('vh_coupons_v1',remoteCoupons); } const remoteProducts=await fetchMenuItems(); if(remoteProducts && remoteProducts.length){ setProducts(remoteProducts); store.set('vh_products_v3',remoteProducts); } };
+ useEffect(()=>{ refreshOrders(); if(!supabase) return; const ch=supabase.channel('orders-painel-verbohub').on('postgres_changes',{event:'*',schema:'public',table:'orders'}, payload=>{ refreshOrders(); if(payload.eventType==='INSERT'){ try{beepRef.current?.play()}catch(e){} } }).subscribe(); const stch=supabase.channel('store-settings-painel').on('postgres_changes',{event:'*',schema:'public',table:'store_settings'}, refreshOrders).subscribe(); const cpch=supabase.channel('coupons-painel').on('postgres_changes',{event:'*',schema:'public',table:'coupons'}, refreshOrders).subscribe(); const mnch=supabase.channel('menu-items-painel').on('postgres_changes',{event:'*',schema:'public',table:'menu_items'}, refreshOrders).subscribe(); return()=>{supabase.removeChannel(ch); supabase.removeChannel(stch); supabase.removeChannel(cpch); supabase.removeChannel(mnch);}; },[]);
  const saveProducts=v=>{setProducts(v);store.set('vh_products_v3',v)};
  const saveAdds=v=>{setAdds(v);store.set('vh_adds_v3',v)};
- const setOpenStore=v=>{
+ const saveCoupons=v=>{setCoupons(v);store.set('vh_coupons_v1',v)};
+ const setOpenStore=async v=>{
    if(v){ const val=prompt('Com quanto em dinheiro está abrindo a loja?','0'); if(val===null) return; setCashOpen(Number(String(val).replace(',','.'))||0); store.set('vh_cash_open',Number(String(val).replace(',','.'))||0); setCashClose(0); store.set('vh_cash_close',0); }
    else { const val=prompt('Quanto tem em dinheiro no caixa ao fechar?','0'); if(val===null) return; setCashClose(Number(String(val).replace(',','.'))||0); store.set('vh_cash_close',Number(String(val).replace(',','.'))||0); }
-   setOpen(v);store.set('vh_store_open',v)
+   setOpen(v);store.set('vh_store_open',v);
+   await saveStoreSettings(v, estimatedMinutes, v?'Estamos recebendo pedidos normalmente.':'Loja fechada no momento.');
  };
  const addProduct=p=>setCart([...cart,{uid:uid(),product:p,adds:[],obs:''}]);
  const toggleAdd=(id,a)=>setCart(cart.map(i=>i.uid===id?{...i,adds:i.adds.find(x=>x.id===a.id)?i.adds.filter(x=>x.id!==a.id):[...i.adds,a]}:i));
@@ -191,22 +232,43 @@ function App(){
  const cancel=id=>confirm('Cancelar este pedido?')&&update(id,{status:'cancelado'});
  const day=orders.filter(o=>new Date(o.date).toLocaleDateString('pt-BR')===today());
  const done=day.filter(o=>o.status==='concluido');
+ const updateStoreConfig=async()=>{ store.set('vh_estimated_minutes',estimatedMinutes); store.set('vh_store_message',storeMessage); await saveStoreSettings(open, estimatedMinutes, storeMessage); alert('Configuração da loja salva.'); };
  return <div className="app">
-  <audio ref={beepRef} src="/pedido.wav" preload="auto"></audio><header className="top"><img src="/logo-verbohub.jpeg"/><div><h1>Verbo Hub</h1><p>{open?'🟢 Loja aberta':'🔴 Loja fechada'} • {today()} • {syncStatus}</p></div><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></header>
-  <nav>{[['novo','Novo pedido'],['pedidos','Pedidos'],['financeiro','Financeiro'],['cardapio','Cardápio']].map(t=><button key={t[0]} className={tab===t[0]?'on':''} onClick={()=>setTab(t[0])}>{t[1]}</button>)}</nav>
-  {tab==='novo'&&<main className="layout"><section className="panel"><h2>Novo pedido</h2><div className="formline"><input placeholder="Nome do cliente / mesa" value={customer} onChange={e=>setCustomer(e.target.value)}/><textarea placeholder="Observação geral" value={obs} onChange={e=>setObs(e.target.value)}/></div><div className="catalog">{cats.map(c=><div className="cat" key={c}><h3>{c}</h3>{products.filter(p=>p.cat===c&&p.active).map(p=><button className="product" key={p.id} onClick={()=>addProduct(p)}><span>{p.name}</span><b>{BRL(p.price)}</b></button>)}</div>)}</div></section><section className="panel ticket"><h2>Pedido atual</h2>{cart.length===0&&<p className="muted">Escolha os produtos do cardápio.</p>}{cart.map(i=><div className="cartitem" key={i.uid}><div className="row"><b>{i.product.name}</b><button className="ghost dangerText" onClick={()=>setCart(cart.filter(x=>x.uid!==i.uid))}>remover</button></div>{i.product.name.toLowerCase().includes('cuscuz base')&&<small>{Math.min(i.adds.length,4)}/4 adicionais grátis • depois cobra automático</small>}{i.product.name.toLowerCase().includes('cuscuz premium')&&<small>Premium: todos os adicionais são cobrados</small>}<div className="chips">{adds.map(a=><button key={a.id} className={i.adds.find(x=>x.id===a.id)?'chip on':'chip'} onClick={()=>toggleAdd(i.uid,a)}>{a.name} {i.product.name.toLowerCase().includes('cuscuz base')?'':`+ ${BRL(a.price)}`}</button>)}</div><b className="totalitem">{BRL(calcItem(i))}</b></div>)}<h2>Total: {BRL(subtotal)}</h2><button className="primary big" onClick={createOrder}>Salvar como pedido aberto</button></section></main>}
-  {tab==='pedidos'&&<main className="orders">{orders.length===0&&<section className="panel"><h2>Nenhum pedido ainda</h2></section>}{orders.map(o=><Order key={o.id} o={o} update={update} cancel={cancel}/>)}</main>}
+  <audio ref={beepRef} src="/pedido.wav" preload="auto"></audio><header className="top"><img src="/logo-verbohub.jpeg"/><div><h1>Verbo Hub</h1><p>{open?'🟢 Loja aberta':'🔴 Loja fechada'} • {today()} • {syncStatus}</p></div><div className="storeControls"><label>Tempo <input type="number" value={estimatedMinutes} onChange={e=>setEstimatedMinutes(e.target.value)}/> min</label><input placeholder="Mensagem da loja" value={storeMessage} onChange={e=>setStoreMessage(e.target.value)}/><button className="ghost" onClick={updateStoreConfig}>Salvar</button><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></div></header>
+  <nav>{[['novo','Novo pedido'],['pedidos','Pedidos'],['cozinha','Tela cozinha'],['financeiro','Financeiro'],['cardapio','Cardápio'],['cupons','Cupons']].map(t=><button key={t[0]} className={tab===t[0]?'on':''} onClick={()=>setTab(t[0])}>{t[1]}</button>)}</nav>
+  {tab==='novo'&&<main className="layout"><section className="panel"><h2>Novo pedido</h2><div className="formline"><input placeholder="Nome do cliente / mesa" value={customer} onChange={e=>setCustomer(e.target.value)}/><textarea placeholder="Observação geral" value={obs} onChange={e=>setObs(e.target.value)}/></div><div className="catalog">{cats.map(c=><div className="cat" key={c}><h3>{c}</h3>{products.filter(p=>p.cat===c&&p.active).map(p=><button className="product" key={p.id} onClick={()=>addProduct(p)}><span>{p.name}</span><b>{BRL(p.price)}</b></button>)}</div>)}</div></section><section className="panel ticket"><h2>Pedido atual</h2>{cart.length===0&&<p className="muted">Escolha os produtos do cardápio.</p>}{cart.map(i=><div className="cartitem" key={i.uid}><div className="row"><b>{i.product.name}</b><button className="ghost dangerText" onClick={()=>setCart(cart.filter(x=>x.uid!==i.uid))}>remover</button></div>{i.product.name.toLowerCase().includes('cuscuz base')&&<small>{Math.min(i.adds.length,3)}/3 adicionais grátis • depois cobra automático</small>}{i.product.name.toLowerCase().includes('cuscuz premium')&&<small>Produto fechado: carne seca, queijo e queijo coalho inclusos.</small>}{!i.product.name.toLowerCase().includes('cuscuz premium')&&<div className="chips">{adds.filter(a=>!(i.product.name.toLowerCase().includes('cuscuz base') && a.name.toLowerCase().includes('carne seca'))).map(a=><button key={a.id} className={i.adds.find(x=>x.id===a.id)?'chip on':'chip'} onClick={()=>toggleAdd(i.uid,a)}>{a.name} {i.product.name.toLowerCase().includes('cuscuz base')?'':`+ ${BRL(a.price)}`}</button>)}</div>}<b className="totalitem">{BRL(calcItem(i))}</b></div>)}<h2>Total: {BRL(subtotal)}</h2><button className="primary big" onClick={createOrder}>Salvar como pedido aberto</button></section></main>}
+  {tab==='pedidos'&&<><Dashboard orders={orders} done={done} day={day}/><main className="orders">{orders.length===0&&<section className="panel"><h2>Nenhum pedido ainda</h2></section>}{orders.map(o=><Order key={o.id} o={o} update={update} cancel={cancel}/>)}</main></>}
+  {tab==='cozinha'&&<Kitchen orders={orders} update={update}/>}
   {tab==='financeiro'&&<Financeiro day={day} done={done} orders={orders} open={open} setOpenStore={setOpenStore} cashOpen={cashOpen} cashClose={cashClose} setCashOpen={v=>{setCashOpen(v);store.set('vh_cash_open',v)}} setCashClose={v=>{setCashClose(v);store.set('vh_cash_close',v)}}/>} 
-  {tab==='cardapio'&&<Cardapio products={products} saveProducts={saveProducts} adds={adds} saveAdds={saveAdds}/>} 
+  {tab==='cardapio'&&<Cardapio products={products} saveProducts={saveProducts} adds={adds} saveAdds={saveAdds}/>}
+  {tab==='cupons'&&<Cupons coupons={coupons} saveCoupons={saveCoupons}/>} 
  </div>;
 }
 
-function Order({o,update,cancel}){const[discount,setDiscount]=useState(o.discount||0),[extra,setExtra]=useState(o.extra||0),[pays,setPays]=useState(o.payments?.length?o.payments:[{method:'Pix',value:''}]); const total=calcOrder({...o,discount,extra,payments:pays}); const paid=pays.reduce((s,p)=>s+Number(p.value||0),0); const save=patch=>update(o.id,{discount:Number(discount)||0,extra:Number(extra)||0,payments:pays,...patch}); return <section className={'panel order '+o.status}><div className="row"><h2>#{o.num} • {o.customer}</h2><span className="badge">{o.status}</span></div>{o.items.map((i,k)=><p key={k}><b>{i.qty||1}x {i.product.name}</b>{i.adds.length?` + ${i.adds.map(a=>a.name).join(', ')}`:''}{i.obs?` • ${i.obs}`:''} — {BRL(calcItem(i))}</p>)}{o.obs&&<p className="muted">Obs: {o.obs}</p>}<div className="checkout"><label>Desconto R$<input type="number" value={discount} onChange={e=>setDiscount(e.target.value)}/></label><label>Valor extra R$<input type="number" value={extra} onChange={e=>setExtra(e.target.value)}/></label><label className="check"><input type="checkbox" checked={o.fiado} onChange={e=>update(o.id,{fiado:e.target.checked})}/> Fiado</label></div><h2>Total: {BRL(total)}</h2><h3>Pagamento dividido</h3>{pays.map((p,idx)=><div className="pay" key={idx}><select value={p.method} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,method:e.target.value}:x))}><option>Pix</option><option>Débito</option><option>Crédito</option><option>Dinheiro</option></select><input type="number" placeholder="valor" value={p.value} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,value:e.target.value}:x))}/></div>)}<button className="ghost" onClick={()=>setPays([...pays,{method:'Pix',value:''}])}>+ forma de pagamento</button><p className={paid>=total?'ok':'warn'}>Pago: {BRL(paid)} • Falta: {BRL(Math.max(0,total-paid))}</p><div className="actions"><button onClick={()=>save({status:'aberto'})}>Aberto</button><button onClick={()=>save({status:'aguardando pagamento'})}>Aguardando</button><button className="primary" onClick={()=>save({status:'concluido'})}>Concluir</button><button onClick={()=>openPrint(orderReceipt({...o,discount:Number(discount)||0,extra:Number(extra)||0,payments:pays}, total))}>Imprimir pedido 80mm</button><button className="danger" onClick={()=>cancel(o.id)}>Cancelar</button></div></section>}
 
-function Financeiro({day,done,orders,open,setOpenStore,cashOpen,cashClose,setCashOpen,setCashClose}){
- const total=done.reduce((sum,o)=>sum+calcOrder(o),0);
- const canceled=day.filter(o=>o.status==='cancelado').length;
- const fiado=orders.filter(o=>o.fiado&&o.status!=='concluido').reduce((sum,o)=>sum+calcOrder(o),0);
+function localDateKey(date){
+ const d = new Date(date || Date.now());
+ const y = d.getFullYear();
+ const m = String(d.getMonth()+1).padStart(2,'0');
+ const day = String(d.getDate()).padStart(2,'0');
+ return `${y}-${m}-${day}`;
+}
+function brDateFromKey(key){
+ if(!key) return today();
+ const [y,m,d]=String(key).split('-');
+ return `${d}/${m}/${y}`;
+}
+function dateOffsetKey(offsetDays=0){
+ const d = new Date();
+ d.setHours(12,0,0,0);
+ d.setDate(d.getDate()+offsetDays);
+ return localDateKey(d);
+}
+function buildFinanceData(allOrders, selectedDate, cashOpen=0, cashClose=0){
+ const selectedOrders = allOrders.filter(o=>localDateKey(o.date)===selectedDate);
+ const done = selectedOrders.filter(o=>o.status==='concluido');
+ const canceled = selectedOrders.filter(o=>o.status==='cancelado').length;
+ const fiado = selectedOrders.filter(o=>o.fiado&&o.status!=='concluido').reduce((sum,o)=>sum+calcOrder(o),0);
  const methods=['Pix','Débito','Crédito','Dinheiro'];
  const aliases={
   'Burgers':['Burgers'],
@@ -220,7 +282,7 @@ function Financeiro({day,done,orders,open,setOpenStore,cashOpen,cashClose,setCas
  const categoryRows=Object.entries(aliases).map(([label,list])=>{
   let qtd=0, valor=0;
   done.forEach(o=>(o.items||[]).forEach(i=>{
-    if(list.includes(i.product.cat)){qtd+=1; valor+=calcItem(i)}
+    if(list.includes(i.product.cat)){qtd+=Number(i.qty)||1; valor+=calcItem(i)}
   }));
   return {label,qtd,valor};
  });
@@ -228,37 +290,144 @@ function Financeiro({day,done,orders,open,setOpenStore,cashOpen,cashClose,setCas
  const dinheiroRecebido=methodsRows.find(x=>x.method==='Dinheiro')?.value||0;
  const dinheiroEsperado=(Number(cashOpen)||0)+dinheiroRecebido;
  const diferenca=(Number(cashClose)||0)-dinheiroEsperado;
- const printClose=()=>openPrint(financeReceipt({categoryRows,methodsRows,cashOpen,dinheiroRecebido,dinheiroEsperado,cashClose,diferenca,total,canceled,fiado,done}));
+ const gross=done.reduce((sum,o)=>sum+(o.items||[]).reduce((s,i)=>s+calcItem(i),0)+(Number(o.extra)||0),0);
+ const discounts=done.reduce((sum,o)=>sum+(Number(o.discount)||0),0);
+ const total=done.reduce((sum,o)=>sum+calcOrder(o),0);
+ const ticket=done.length?total/done.length:0;
+ return {selectedOrders,done,canceled,fiado,methodsRows,categoryRows,dinheiroRecebido,dinheiroEsperado,diferenca,gross,discounts,total,ticket};
+}
+
+
+function Dashboard({orders,done,day}){
+ const active=orders.filter(o=>!['concluido','cancelado'].includes(o.status)).length;
+ const total=done.reduce((s,o)=>s+calcOrder(o),0);
+ const ticket=done.length?total/done.length:0;
+ return <main className="dash"><section className="card pro"><p>Faturamento hoje</p><h2>{BRL(total)}</h2></section><section className="card pro"><p>Pedidos hoje</p><h2>{day.length}</h2></section><section className="card pro"><p>Ticket médio</p><h2>{BRL(ticket)}</h2></section><section className="card pro"><p>Pedidos ativos</p><h2>{active}</h2></section></main>;
+}
+
+
+function useNowTick(){
+ const [now,setNow]=useState(Date.now());
+ useEffect(()=>{ const t=setInterval(()=>setNow(Date.now()),1000); return()=>clearInterval(t); },[]);
+ return now;
+}
+function prepClock(date, now){
+ const started = new Date(date || Date.now()).getTime();
+ const elapsed = Math.max(0, Math.floor((now-started)/1000));
+ const remaining = Math.max(0, (20*60)-elapsed);
+ const mm = String(Math.floor(remaining/60)).padStart(2,'0');
+ const ss = String(remaining%60).padStart(2,'0');
+ return {elapsed,remaining,label:`${mm}:${ss}`};
+}
+
+function Kitchen({orders,update}){
+ const now=useNowTick();
+ const list=orders.filter(o=>!['concluido','cancelado'].includes(o.status));
+ return <main className="kitchen"><section className="kitchenHead"><h2>🔥 Tela da Cozinha</h2><p>Meta de preparo: máximo 20 minutos por pedido. O relógio fica vermelho quando estoura.</p></section>{list.length===0&&<section className="panel"><h2>Nenhum pedido ativo na cozinha</h2></section>}{list.map(o=>{ const clock=prepClock(o.date,now); return <section className={'kitchenOrder '+o.status+(clock.remaining<=0?' late':'')} key={o.id}><div className="row"><h2>#{o.num} • {o.customer}</h2><span className={clock.remaining<=0?'badge danger':'badge'}>⏱ {clock.remaining<=0?'Estourou 20 min':clock.label}</span><span className="badge">{o.status}</span></div>{o.items.map((i,k)=><div className="kitem" key={k}><b>{i.qty||1}x {i.product.name}</b>{i.adds?.length? <small>Extras: {i.adds.map(a=>a.name).join(', ')}</small>:null}{i.included?.length? <small>Inclusos: {i.included.join(', ')}</small>:null}{i.obs? <em>Obs: {i.obs}</em>:null}</div>)}{o.obs&&<p className="warn">Obs geral: {o.obs}</p>}<div className="actions"><button onClick={()=>update(o.id,{status:'preparando'})}>Preparando</button><button className="primary" onClick={()=>update(o.id,{status:'concluido'})}>Pronto/Concluir</button></div></section>})}</main>;
+}
+
+function Order({o,update,cancel}){const[discount,setDiscount]=useState(o.discount||0),[extra,setExtra]=useState(o.extra||0),[pays,setPays]=useState(o.payments?.length?o.payments:[{method:'Pix',value:''}]); const total=calcOrder({...o,discount,extra,payments:pays}); const paid=pays.reduce((s,p)=>s+Number(p.value||0),0); const save=patch=>update(o.id,{discount:Number(discount)||0,extra:Number(extra)||0,payments:pays,...patch}); return <section className={'panel order '+o.status}><div className="row"><h2>#{o.num} • {o.customer}</h2><span className="badge">{o.status}</span></div>{o.items.map((i,k)=><p key={k}><b>{i.qty||1}x {i.product.name}</b>{i.adds.length?` + ${i.adds.map(a=>a.name).join(', ')}`:''}{i.obs?` • ${i.obs}`:''} — {BRL(calcItem(i))}</p>)}{o.obs&&<p className="muted">Obs: {o.obs}</p>}<div className="checkout"><label>Desconto R$<input type="number" value={discount} onChange={e=>setDiscount(e.target.value)}/></label><label>Valor extra R$<input type="number" value={extra} onChange={e=>setExtra(e.target.value)}/></label><label className="check"><input type="checkbox" checked={o.fiado} onChange={e=>update(o.id,{fiado:e.target.checked})}/> Fiado</label></div><h2>Total: {BRL(total)}</h2><h3>Pagamento dividido</h3>{pays.map((p,idx)=><div className="pay" key={idx}><select value={p.method} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,method:e.target.value}:x))}><option>Pix</option><option>Débito</option><option>Crédito</option><option>Dinheiro</option></select><input type="number" placeholder="valor" value={p.value} onChange={e=>setPays(pays.map((x,i)=>i===idx?{...x,value:e.target.value}:x))}/></div>)}<button className="ghost" onClick={()=>setPays([...pays,{method:'Pix',value:''}])}>+ forma de pagamento</button><p className={paid>=total?'ok':'warn'}>Pago: {BRL(paid)} • Falta: {BRL(Math.max(0,total-paid))}</p><div className="actions"><button onClick={()=>save({status:'aberto'})}>Aberto</button><button onClick={()=>save({status:'aguardando pagamento'})}>Aguardando</button><button className="primary" onClick={()=>save({status:'concluido'})}>Concluir</button><button onClick={()=>openPrint(orderReceipt({...o,discount:Number(discount)||0,extra:Number(extra)||0,payments:pays}, total))}>Imprimir pedido 80mm</button><button className="danger" onClick={()=>cancel(o.id)}>Cancelar</button></div></section>}
+
+function Financeiro({day,done,orders,open,setOpenStore,cashOpen,cashClose,setCashOpen,setCashClose}){
+ const [selectedDate,setSelectedDate]=useState(dateOffsetKey(0));
+ const [reportCashOpen,setReportCashOpen]=useState(cashOpen||0);
+ const [reportCashClose,setReportCashClose]=useState(cashClose||0);
+ const data=useMemo(()=>buildFinanceData(orders, selectedDate, reportCashOpen, reportCashClose),[orders,selectedDate,reportCashOpen,reportCashClose]);
+ const todayData=useMemo(()=>buildFinanceData(orders, dateOffsetKey(0), cashOpen, cashClose),[orders,cashOpen,cashClose]);
+ const yesterdayData=useMemo(()=>buildFinanceData(orders, dateOffsetKey(-1), 0, 0),[orders]);
+ const dateLabel=brDateFromKey(selectedDate);
+ const printClose=()=>openPrint(financeReceipt({...data,cashOpen:reportCashOpen,cashClose:reportCashClose,dateLabel}));
+ const useTodayCash=()=>{ setReportCashOpen(Number(cashOpen)||0); setReportCashClose(Number(cashClose)||0); };
+ const setQuickDate=(offset)=>{ const key=dateOffsetKey(offset); setSelectedDate(key); if(offset===0){ setReportCashOpen(Number(cashOpen)||0); setReportCashClose(Number(cashClose)||0); } else { setReportCashOpen(0); setReportCashClose(0); } };
  return <main className="finance">
-  <section className="card"><p>Total vendido hoje</p><h2>{BRL(total)}</h2></section>
-  <section className="card"><p>Concluídos</p><h2>{done.length}</h2></section>
-  <section className="card"><p>Cancelados</p><h2>{canceled}</h2></section>
-  <section className="card"><p>Fiado em aberto</p><h2>{BRL(fiado)}</h2></section>
+  <section className="card"><p>Total vendido hoje</p><h2>{BRL(todayData.total)}</h2></section>
+  <section className="card"><p>Concluídos hoje</p><h2>{todayData.done.length}</h2></section>
+  <section className="card"><p>Total vendido ontem</p><h2>{BRL(yesterdayData.total)}</h2></section>
+  <section className="card"><p>Concluídos ontem</p><h2>{yesterdayData.done.length}</h2></section>
   <section className="panel wide printArea">
-   <h2>Fechamento do dia • {today()}</h2>
+   <div className="row"><div><h2>Fechamento de caixa • {dateLabel}</h2><p className="muted">Escolha qualquer data salva no Supabase para ver, conferir e imprimir o fechamento.</p></div><button onClick={printClose}>Imprimir fechamento</button></div>
    <div className="cashbox noPrint">
-    <label>Dinheiro na abertura<input type="number" value={cashOpen} onChange={e=>setCashOpen(Number(e.target.value)||0)}/></label>
-    <label>Dinheiro no fechamento<input type="number" value={cashClose} onChange={e=>setCashClose(Number(e.target.value)||0)}/></label>
+    <button className={selectedDate===dateOffsetKey(0)?'primary':'ghost'} onClick={()=>setQuickDate(0)}>Hoje</button>
+    <button className={selectedDate===dateOffsetKey(-1)?'primary':'ghost'} onClick={()=>setQuickDate(-1)}>Ontem</button>
+    <label>Data do fechamento<input type="date" value={selectedDate} onChange={e=>{setSelectedDate(e.target.value); setReportCashOpen(0); setReportCashClose(0);}}/></label>
+    <label>Dinheiro na abertura<input type="number" value={reportCashOpen} onChange={e=>setReportCashOpen(Number(e.target.value)||0)}/></label>
+    <label>Dinheiro no fechamento<input type="number" value={reportCashClose} onChange={e=>setReportCashClose(Number(e.target.value)||0)}/></label>
+    {selectedDate===dateOffsetKey(0)&&<button className="ghost" onClick={useTodayCash}>Usar caixa de hoje</button>}
    </div>
+   <div className="dash mini">
+    <section className="card"><p>Faturamento bruto</p><h2>{BRL(data.gross)}</h2></section>
+    <section className="card"><p>Descontos</p><h2>{BRL(data.discounts)}</h2></section>
+    <section className="card"><p>Faturamento líquido</p><h2>{BRL(data.total)}</h2></section>
+    <section className="card"><p>Ticket médio</p><h2>{BRL(data.ticket)}</h2></section>
+   </div>
+   <p className="row"><b>Pedidos concluídos</b><span>{data.done.length}</span></p>
+   <p className="row"><b>Pedidos cancelados</b><span>{data.canceled}</span></p>
+   <p className="row"><b>Fiado em aberto do dia</b><span>{BRL(data.fiado)}</span></p>
+   <hr/>
    <h3>Vendas por categoria</h3>
-   {categoryRows.map(r=><p className="row" key={r.label}><b>{r.label}</b><span>{r.qtd} un • {BRL(r.valor)}</span></p>)}
+   {data.categoryRows.map(r=><p className="row" key={r.label}><b>{r.label}</b><span>{r.qtd} un • {BRL(r.valor)}</span></p>)}
    <hr/>
    <h3>Formas de pagamento</h3>
-   {methods.map(m=><p className="row" key={m}><b>{m}</b><span>{BRL(done.flatMap(o=>o.payments||[]).filter(p=>p.method===m).reduce((sum,p)=>sum+Number(p.value||0),0))}</span></p>)}
+   {data.methodsRows.map(r=><p className="row" key={r.method}><b>{r.method}</b><span>{BRL(r.value)}</span></p>)}
    <hr/>
    <h3>Caixa em dinheiro</h3>
-   <p className="row"><b>Abertura</b><span>{BRL(cashOpen)}</span></p>
-   <p className="row"><b>Dinheiro recebido</b><span>{BRL(dinheiroRecebido)}</span></p>
-   <p className="row"><b>Fechamento esperado</b><span>{BRL(dinheiroEsperado)}</span></p>
-   <p className="row"><b>Fechamento informado</b><span>{BRL(cashClose)}</span></p>
-   <p className="row"><b>Diferença</b><span className={diferenca===0?'ok':'warn'}>{BRL(diferenca)}</span></p>
+   <p className="row"><b>Abertura</b><span>{BRL(reportCashOpen)}</span></p>
+   <p className="row"><b>Dinheiro recebido</b><span>{BRL(data.dinheiroRecebido)}</span></p>
+   <p className="row"><b>Fechamento esperado</b><span>{BRL(data.dinheiroEsperado)}</span></p>
+   <p className="row"><b>Fechamento informado</b><span>{BRL(reportCashClose)}</span></p>
+   <p className="row"><b>Diferença</b><span className={data.diferenca===0?'ok':'warn'}>{BRL(data.diferenca)}</span></p>
    <hr/>
-   <p className="row"><b>Total geral</b><b>{BRL(total)}</b></p>
-   <div className="actions noPrint"><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button><button onClick={printClose}>Imprimir financeiro 80mm</button></div>
+   <p className="row"><b>Total geral</b><b>{BRL(data.total)}</b></p>
+   <div className="actions noPrint"><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button><button onClick={printClose}>Imprimir fechamento</button></div>
   </section>
  </main>
 }
 
-function Cardapio({products,saveProducts,adds,saveAdds}){const blank={cat:'Burgers',name:'',price:''}; const[p,setP]=useState(blank); const[a,setA]=useState({name:'',price:''}); const cats=[...new Set(products.map(p=>p.cat))]; const addProd=()=>{ if(!p.name||!p.price) return alert('Preencha nome e preço.'); saveProducts([...products,{...p,id:uid(),price:Number(p.price),active:true}]); setP(blank);}; const del=id=>confirm('Remover item?')&&saveProducts(products.filter(p=>p.id!==id)); const addAdd=()=>{ if(!a.name||!a.price) return alert('Preencha adicional e valor.'); saveAdds([...adds,{id:uid(),name:a.name,price:Number(a.price)}]); setA({name:'',price:''});}; return <main className="layout"><section className="panel"><h2>Cadastrar produto</h2><div className="formgrid"><input placeholder="Categoria" list="cats" value={p.cat} onChange={e=>setP({...p,cat:e.target.value})}/><datalist id="cats">{cats.map(c=><option key={c}>{c}</option>)}</datalist><input placeholder="Nome do produto" value={p.name} onChange={e=>setP({...p,name:e.target.value})}/><input type="number" placeholder="Preço" value={p.price} onChange={e=>setP({...p,price:e.target.value})}/><button className="primary" onClick={addProd}>Adicionar ao cardápio</button></div><h2>Adicionais</h2><div className="formgrid"><input placeholder="Nome do adicional" value={a.name} onChange={e=>setA({...a,name:e.target.value})}/><input type="number" placeholder="Preço" value={a.price} onChange={e=>setA({...a,price:e.target.value})}/><button onClick={addAdd}>Adicionar adicional</button></div><div className="chips">{adds.map(x=><button className="chip" key={x.id}>{x.name} • {BRL(x.price)}</button>)}</div></section><section className="panel"><h2>Cardápio atual</h2>{cats.map(c=><div key={c}><h3>{c}</h3>{products.filter(p=>p.cat===c).map(p=><p className="row" key={p.id}><span>{p.name}</span><b>{BRL(p.price)}</b><button className="ghost dangerText" onClick={()=>del(p.id)}>remover</button></p>)}</div>)}</section></main>}
+
+function Cupons({coupons,saveCoupons}){
+ const [form,setForm]=useState({code:'',percent:'10',active:true});
+ const add=async()=>{
+  const code=String(form.code||'').trim().toUpperCase();
+  const percent=Number(form.percent)||0;
+  if(!code || percent<=0) return alert('Preencha o nome do cupom e a porcentagem.');
+  if(percent>100) return alert('A porcentagem máxima é 100%.');
+  const temp={id:uid(),code,percent,active:form.active};
+  if(supabase){ const {error}=await saveCouponRemote(temp); if(error){ alert('Erro ao salvar cupom no Supabase: '+error.message); return; } const remote=await fetchCoupons(); if(remote) saveCoupons(remote); }
+  else saveCoupons([temp,...coupons]);
+  setForm({code:'',percent:'10',active:true});
+ };
+ const toggle=async(c)=>{
+  const changed={...c,active:!c.active};
+  if(supabase){ const {error}=await saveCouponRemote(changed); if(error){ alert('Erro ao atualizar cupom: '+error.message); return; } const remote=await fetchCoupons(); if(remote) saveCoupons(remote); }
+  else saveCoupons(coupons.map(x=>x.id===c.id?changed:x));
+ };
+ const remove=async(c)=>{
+  if(!confirm('Remover este cupom?')) return;
+  if(supabase){ const {error}=await deleteCouponRemote(c.id); if(error){ alert('Erro ao remover cupom: '+error.message); return; } const remote=await fetchCoupons(); if(remote) saveCoupons(remote); }
+  else saveCoupons(coupons.filter(x=>x.id!==c.id));
+ };
+ return <main className="layout"><section className="panel"><h2>Criar cupom de desconto</h2><p className="muted">O cupom salvo aqui aparece no cardápio digital. O cliente digita o nome do cupom e o desconto entra no pedido sincronizado.</p><div className="formgrid"><input placeholder="Nome do cupom. Ex.: VERBO10" value={form.code} onChange={e=>setForm({...form,code:e.target.value.toUpperCase()})}/><input type="number" placeholder="Porcentagem" value={form.percent} onChange={e=>setForm({...form,percent:e.target.value})}/><label className="check"><input type="checkbox" checked={form.active} onChange={e=>setForm({...form,active:e.target.checked})}/> Ativo</label><button className="primary" onClick={add}>Salvar cupom</button></div></section><section className="panel"><h2>Cupons cadastrados</h2>{coupons.length===0&&<p className="muted">Nenhum cupom cadastrado ainda.</p>}{coupons.map(c=><p className="row" key={c.id}><span><b>{c.code || c.name}</b> • {Number(c.percent)||0}%</span><b>{c.active?'Ativo':'Inativo'}</b><button className="ghost" onClick={()=>toggle(c)}>{c.active?'Desativar':'Ativar'}</button><button className="ghost dangerText" onClick={()=>remove(c)}>remover</button></p>)}</section></main>
+}
+
+function Cardapio({products,saveProducts,adds,saveAdds}){
+ const blank={cat:'Burgers',name:'',description:'',price:'',active:true};
+ const [p,setP]=useState(blank);
+ const [a,setA]=useState({name:'',price:''});
+ const cats=[...new Set(products.map(p=>p.cat))];
+ const persist=async(next)=>{
+   saveProducts(next);
+   if(!supabase){ alert('Produto salvo apenas neste navegador. Configure as variáveis do Supabase na Vercel para sincronizar com o cardápio digital.'); return false; }
+   for(const [idx,item] of next.entries()){
+     const {error}=await saveProductRemote(item,idx);
+     if(error){ alert('Erro ao salvar produto no Supabase: '+error.message); return false; }
+   }
+   return true;
+ };
+ const addProd=async()=>{ if(!p.name||!p.price) return alert('Preencha nome e preço.'); const item={...p,id:slugify(p.name)+'-'+Date.now(),price:Number(p.price),active:p.active!==false,sort_order:products.length}; const next=[...products,item]; const ok=await persist(next); if(ok){ const remote=await fetchMenuItems(); if(remote?.length) saveProducts(remote); } setP(blank); };
+ const updateProd=async(id,patch)=>{ const next=products.map((x,idx)=>x.id===id?{...x,...patch,price:patch.price!==undefined?Number(patch.price):x.price,sort_order:idx}:x); saveProducts(next); if(supabase){ const item=next.find(x=>x.id===id); const {error}=await saveProductRemote(item,next.indexOf(item)); if(error) alert('Erro ao salvar no Supabase: '+error.message); } };
+ const del=async(id)=>{ if(!confirm('Remover item?')) return; const next=products.filter(p=>p.id!==id); saveProducts(next); if(supabase){ const {error}=await deleteProductRemote(id); if(error) alert('Erro ao remover no Supabase: '+error.message); } };
+ const addAdd=()=>{ if(!a.name||!a.price) return alert('Preencha adicional e valor.'); saveAdds([...adds,{id:uid(),name:a.name,price:Number(a.price)}]); setA({name:'',price:''}); };
+ return <main className="layout"><section className="panel"><h2>Cadastrar produto</h2><p className="muted">Tudo que você salvar aqui vai para o Supabase e aparece no cardápio digital sem subir código de novo.</p>{!supabase&&<p className="warn"><b>Atenção:</b> Supabase não configurado neste painel. O produto só vai ficar local e não aparecerá no cardápio online.</p>}<div className="formgrid"><input placeholder="Categoria" list="cats" value={p.cat} onChange={e=>setP({...p,cat:e.target.value})}/><datalist id="cats">{cats.map(c=><option key={c}>{c}</option>)}</datalist><input placeholder="Nome do produto" value={p.name} onChange={e=>setP({...p,name:e.target.value})}/><input placeholder="Descrição" value={p.description} onChange={e=>setP({...p,description:e.target.value})}/><input type="number" placeholder="Preço" value={p.price} onChange={e=>setP({...p,price:e.target.value})}/><label className="check"><input type="checkbox" checked={p.active} onChange={e=>setP({...p,active:e.target.checked})}/> Ativo</label><button className="primary" onClick={addProd}>Adicionar ao cardápio</button></div><h2>Adicionais</h2><div className="formgrid"><input placeholder="Nome do adicional" value={a.name} onChange={e=>setA({...a,name:e.target.value})}/><input type="number" placeholder="Preço" value={a.price} onChange={e=>setA({...a,price:e.target.value})}/><button onClick={addAdd}>Adicionar adicional</button></div><div className="chips">{adds.map(x=><button className="chip" key={x.id}>{x.name} • {BRL(x.price)}</button>)}</div></section><section className="panel"><h2>Cardápio atual</h2>{cats.map(c=><div key={c}><h3>{c}</h3>{products.filter(p=>p.cat===c).map(p=><div className="row" key={p.id}><span style={{flex:1}}><input value={p.name} onChange={e=>updateProd(p.id,{name:e.target.value})}/><input value={p.description||''} placeholder="Descrição" onChange={e=>updateProd(p.id,{description:e.target.value})}/></span><input style={{maxWidth:110}} type="number" value={p.price} onChange={e=>updateProd(p.id,{price:e.target.value})}/><label className="check"><input type="checkbox" checked={p.active!==false} onChange={e=>updateProd(p.id,{active:e.target.checked})}/> Ativo</label><button className="ghost dangerText" onClick={()=>del(p.id)}>remover</button></div>)}</div>)}</section></main>
+}
 
 createRoot(document.getElementById('root')).render(<App/>);
