@@ -7,6 +7,11 @@ import './style.css';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+const ADMIN_SECRET = import.meta.env.VITE_ADMIN_SECRET || '2026';
+async function adminRpc(name, payload={}){
+  if(!supabase) return {data:null,error:null};
+  return await supabase.rpc(name, { ...payload, admin_key: ADMIN_SECRET });
+}
 
 const BRL = v => (Number(v)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const today = () => new Date().toLocaleDateString('pt-BR');
@@ -115,7 +120,7 @@ function orderToSupabase(o){
 }
 async function fetchSupabaseOrders(){
   if(!supabase) return null;
-  const {data,error}=await supabase.from('orders').select('*').order('created_at',{ascending:false}).limit(1000);
+  const {data,error}=await adminRpc('admin_list_orders');
   if(error){ console.error(error); return null; }
   return (data||[]).map(orderFromSupabase);
 }
@@ -127,21 +132,16 @@ async function fetchSupabaseOrders(){
 function slugify(v){ return String(v||'categoria').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'categoria'; }
 function productFromMenuItem(row){ return { id:row.id, cat:row.category_name || row.cat || 'Cardápio', name:row.name, description:row.description || '', price:Number(row.price)||0, active:row.active !== false, category_id:row.category_id || slugify(row.category_name), icon:row.icon || '🍽️', addons:row.addons ?? null, sort_order:row.sort_order || 0 }; }
 function menuItemFromProduct(p, index=0){ return { id:String(p.id || slugify(p.name)+'-'+Date.now()), category_id:p.category_id || slugify(p.cat), category_name:p.cat || 'Cardápio', icon:p.icon || '🍽️', addons:p.addons ?? null, name:p.name, description:p.description || '', price:Number(p.price)||0, active:p.active !== false, sort_order:Number(p.sort_order ?? index)||0, updated_at:new Date().toISOString() }; }
-async function fetchMenuItems(){ if(!supabase) return null; const {data,error}=await supabase.from('menu_items').select('*').order('sort_order',{ascending:true}).order('created_at',{ascending:true}); if(error){ console.error(error); return null; } return (data||[]).map(productFromMenuItem); }
-async function saveProductRemote(p,index=0){ if(!supabase) return {error:null}; return await supabase.from('menu_items').upsert(menuItemFromProduct(p,index)); }
-async function deleteProductRemote(id){ if(!supabase) return {error:null}; return await supabase.from('menu_items').delete().eq('id',String(id)); }
-async function fetchCoupons(){ if(!supabase) return null; const {data,error}=await supabase.from('coupons').select('*').order('created_at',{ascending:false}); if(error){ console.error(error); return null; } return data||[]; }
+async function fetchMenuItems(){ if(!supabase) return null; const {data,error}=await adminRpc('admin_list_menu_items'); if(error){ console.error(error); return null; } return (data||[]).map(productFromMenuItem); }
+async function saveProductRemote(p,index=0){ if(!supabase) return {error:null}; return await adminRpc('admin_upsert_menu_item', { item: menuItemFromProduct(p,index) }); }
+async function deleteProductRemote(id){ if(!supabase) return {error:null}; return await adminRpc('admin_delete_menu_item', { item_id: String(id) }); }
+async function fetchCoupons(){ if(!supabase) return null; const {data,error}=await adminRpc('admin_list_coupons'); if(error){ console.error(error); return null; } return data||[]; }
 async function saveCouponRemote(c){
   if(!supabase) return {error:null};
-  const payload={
-    code:String(c.code||c.name||'').trim().toUpperCase(),
-    percent:Number(c.percent)||0,
-    active:c.active!==false
-  };
-  // A tabela cria o UUID sozinha. Isso evita erro quando o painel usa id temporário local.
-  return await supabase.from('coupons').upsert(payload,{onConflict:'code'}).select();
+  const payload={ code:String(c.code||c.name||'').trim().toUpperCase(), percent:Number(c.percent)||0, active:c.active!==false };
+  return await adminRpc('admin_upsert_coupon', { coupon: payload });
 }
-async function deleteCouponRemote(id){ if(!supabase) return {error:null}; return await supabase.from('coupons').delete().eq('id',id); }
+async function deleteCouponRemote(id){ if(!supabase) return {error:null}; return await adminRpc('admin_delete_coupon', { coupon_id: id }); }
 
 async function fetchStoreSettings(){
   if(!supabase) return null;
@@ -152,7 +152,7 @@ async function fetchStoreSettings(){
 async function saveStoreSettings(open, estimated=25, message){
   if(!supabase) return null;
   const payload={id:'main', is_open:!!open, estimated_minutes:Number(estimated)||25, message:message || (open?'Estamos recebendo pedidos normalmente.':'Loja fechada no momento.'), updated_at:new Date().toISOString()};
-  const {error}=await supabase.from('store_settings').upsert(payload);
+  const {error}=await adminRpc('admin_save_store_settings', { settings: payload });
   if(error) alert('Erro ao salvar loja aberta/fechada: '+error.message);
   return !error;
 }
@@ -184,6 +184,7 @@ function App(){
  const [orders,setOrders]=useState(()=>store.get('vh_orders_v3',[]));
  const [syncStatus,setSyncStatus]=useState(supabase?'Conectando ao Supabase...':'Modo local: configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY para sincronizar.');
  const beepRef=useRef(null);
+ const latestOrderRef=useRef(null);
  const [open,setOpen]=useState(()=>store.get('vh_store_open',false));
  const [estimatedMinutes,setEstimatedMinutes]=useState(()=>store.get('vh_estimated_minutes',25));
  const [storeMessage,setStoreMessage]=useState(()=>store.get('vh_store_message','Estamos recebendo pedidos normalmente.'));
@@ -192,8 +193,8 @@ function App(){
  const [cart,setCart]=useState([]); const [customer,setCustomer]=useState(''); const [obs,setObs]=useState('');
  const cats=useMemo(()=>[...new Set(products.map(p=>p.cat))], [products]);
  const saveOrders=v=>{setOrders(v);store.set('vh_orders_v3',v)};
- const refreshOrders=async()=>{ const remote=await fetchSupabaseOrders(); if(remote){ saveOrders(remote); setSyncStatus('Sincronizado com Supabase'); } const st=await fetchStoreSettings(); if(st){ setOpen(st.is_open!==false); store.set('vh_store_open',st.is_open!==false); setEstimatedMinutes(st.estimated_minutes||25); store.set('vh_estimated_minutes',st.estimated_minutes||25); setStoreMessage(st.message||''); store.set('vh_store_message',st.message||''); } const remoteCoupons=await fetchCoupons(); if(remoteCoupons){ setCoupons(remoteCoupons); store.set('vh_coupons_v1',remoteCoupons); } const remoteProducts=await fetchMenuItems(); if(remoteProducts && remoteProducts.length){ setProducts(remoteProducts); store.set('vh_products_v3',remoteProducts); } };
- useEffect(()=>{ refreshOrders(); if(!supabase) return; const ch=supabase.channel('orders-painel-verbohub').on('postgres_changes',{event:'*',schema:'public',table:'orders'}, payload=>{ refreshOrders(); if(payload.eventType==='INSERT'){ try{beepRef.current?.play()}catch(e){} } }).subscribe(); const stch=supabase.channel('store-settings-painel').on('postgres_changes',{event:'*',schema:'public',table:'store_settings'}, refreshOrders).subscribe(); const cpch=supabase.channel('coupons-painel').on('postgres_changes',{event:'*',schema:'public',table:'coupons'}, refreshOrders).subscribe(); const mnch=supabase.channel('menu-items-painel').on('postgres_changes',{event:'*',schema:'public',table:'menu_items'}, refreshOrders).subscribe(); return()=>{supabase.removeChannel(ch); supabase.removeChannel(stch); supabase.removeChannel(cpch); supabase.removeChannel(mnch);}; },[]);
+ const refreshOrders=async()=>{ const remote=await fetchSupabaseOrders(); if(remote){ const latest=remote[0]?.id || null; if(latestOrderRef.current && latest && latest !== latestOrderRef.current){ try{beepRef.current?.play()}catch(e){} } latestOrderRef.current=latest || latestOrderRef.current; saveOrders(remote); setSyncStatus('Sincronizado com Supabase'); } const st=await fetchStoreSettings(); if(st){ setOpen(st.is_open!==false); store.set('vh_store_open',st.is_open!==false); setEstimatedMinutes(st.estimated_minutes||25); store.set('vh_estimated_minutes',st.estimated_minutes||25); setStoreMessage(st.message||''); store.set('vh_store_message',st.message||''); } const remoteCoupons=await fetchCoupons(); if(remoteCoupons){ setCoupons(remoteCoupons); store.set('vh_coupons_v1',remoteCoupons); } const remoteProducts=await fetchMenuItems(); if(remoteProducts && remoteProducts.length){ setProducts(remoteProducts); store.set('vh_products_v3',remoteProducts); } };
+ useEffect(()=>{ refreshOrders(); if(!supabase) return; const timer=setInterval(refreshOrders,5000); const stch=supabase.channel('store-settings-painel').on('postgres_changes',{event:'*',schema:'public',table:'store_settings'}, refreshOrders).subscribe(); return()=>{clearInterval(timer); supabase.removeChannel(stch);}; },[]);
  const saveProducts=v=>{setProducts(v);store.set('vh_products_v3',v)};
  const saveAdds=v=>{setAdds(v);store.set('vh_adds_v3',v)};
  const saveCoupons=v=>{setCoupons(v);store.set('vh_coupons_v1',v)};
@@ -210,7 +211,7 @@ function App(){
    if(!cart.length) return alert('Adicione produtos ao pedido.'); 
    const o={id:uid(),num:orders.length+1,date:new Date().toISOString(),customer:customer||'Cliente balcão',items:cart,obs,status:'aberto',discount:0,extra:0,payments:[],fiado:false}; 
    if(supabase){
-     const {error}=await supabase.from('orders').insert(orderToSupabase(o));
+     const {error}=await adminRpc('admin_insert_order', { order_data: orderToSupabase(o) });
      if(error){ alert('Erro ao salvar no Supabase: '+error.message); return; }
      await refreshOrders();
    } else {
@@ -225,7 +226,7 @@ function App(){
      const current=next.find(o=>o.id===id);
      const payload={status:current.status, discount:Number(current.discount)||0, extra:Number(current.extra)||0, fiado:!!current.fiado};
      if(current.payments) payload.payment_method=current.payments[0]?.method || null;
-     const {error}=await supabase.from('orders').update(payload).eq('id',id);
+     const {error}=await adminRpc('admin_update_order', { order_id: id, patch: payload });
      if(error) alert('Erro ao atualizar no Supabase: '+error.message);
    }
  };
