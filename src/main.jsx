@@ -276,10 +276,11 @@ function App(){
  const updateStoreConfig=async()=>{ const cleanPhone=formatPhone(deliveryWhatsApp); store.set('vh_estimated_minutes',estimatedMinutes); store.set('vh_store_message',storeMessage); store.set('vh_delivery_whatsapp',cleanPhone); setDeliveryWhatsApp(cleanPhone); await saveStoreSettings(open, estimatedMinutes, storeMessage, cleanPhone); alert('Configuração da loja salva.'); };
  return <div className="app shell">
   <audio ref={beepRef} src="/pedido.wav" preload="auto"></audio>
-  <aside className="sidebar noPrint"><div className="brand"><img src="/logo-verbohub.jpeg"/><div><b>VERBO HUB</b><span>Painel operacional</span></div></div><nav>{[['novo','Novo pedido','plus'],['pedidos','Pedidos','orders'],['cozinha','Cozinha','kitchen'],['financeiro','Financeiro','finance'],['cardapio','Cardápio','menu'],['cupons','Cupons','coupon'],['recibo','Configurações','settings']].map(t=><button key={t[0]} className={(tab===t[0]?'on ':'')+'navItem '+t[2]} onClick={()=>setTab(t[0])}><span></span>{t[1]}</button>)}</nav><p className="sideFoot">{open?'Loja aberta':'Loja fechada'} • {today()}</p></aside>
-  <section className="workspace"><header className="top"><div><small>PAINEL OPERACIONAL</small><h1>{tab==='novo'?'Novo pedido':tab==='pedidos'?'Pedidos':tab==='cozinha'?'Cozinha':tab==='financeiro'?'Financeiro':tab==='cardapio'?'Cardápio':tab==='cupons'?'Cupons':'Configurações'}</h1><p>{open?'Loja aberta':'Loja fechada'} • {today()} • {syncStatus}</p></div><div className="storeControls"><label>Tempo <input type="number" value={estimatedMinutes} onChange={e=>setEstimatedMinutes(e.target.value)}/> min</label><input placeholder="Mensagem da loja" value={storeMessage} onChange={e=>setStoreMessage(e.target.value)}/><button className="ghost" onClick={updateStoreConfig}>Salvar</button><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></div></header>
+  <aside className="sidebar noPrint"><div className="brand"><img src="/logo-verbohub.jpeg"/><div><b>VERBO HUB</b><span>Painel operacional</span></div></div><nav>{[['novo','Novo pedido','plus'],['pedidos','Pedidos ativos','orders'],['finalizados','Finalizados','done'],['cozinha','Cozinha','kitchen'],['financeiro','Financeiro','finance'],['cardapio','Cardápio','menu'],['cupons','Cupons','coupon'],['recibo','Configurações','settings']].map(t=><button key={t[0]} className={(tab===t[0]?'on ':'')+'navItem '+t[2]} onClick={()=>setTab(t[0])}><span></span>{t[1]}</button>)}</nav><p className="sideFoot">{open?'Loja aberta':'Loja fechada'} • {today()}</p></aside>
+  <section className="workspace"><header className="top"><div><small>PAINEL OPERACIONAL</small><h1>{tab==='novo'?'Novo pedido':tab==='pedidos'?'Pedidos ativos':tab==='finalizados'?'Finalizados':tab==='cozinha'?'Cozinha':tab==='financeiro'?'Financeiro':tab==='cardapio'?'Cardápio':tab==='cupons'?'Cupons':'Configurações'}</h1><p>{open?'Loja aberta':'Loja fechada'} • {today()} • {syncStatus}</p></div><div className="storeControls"><label>Tempo <input type="number" value={estimatedMinutes} onChange={e=>setEstimatedMinutes(e.target.value)}/> min</label><input placeholder="Mensagem da loja" value={storeMessage} onChange={e=>setStoreMessage(e.target.value)}/><button className="ghost" onClick={updateStoreConfig}>Salvar</button><button className={open?'danger':'primary'} onClick={()=>setOpenStore(!open)}>{open?'Fechar loja':'Abrir loja'}</button></div></header>
   {tab==='novo'&&<main className="layout"><section className="panel"><h2>Novo pedido</h2><div className="formline"><input placeholder="Nome do cliente / mesa" value={customer} onChange={e=>setCustomer(e.target.value)}/><textarea placeholder="Observação geral" value={obs} onChange={e=>setObs(e.target.value)}/></div><div className="catalog">{cats.map(c=><div className="cat" key={c}><h3><CategoryBadge cat={c}/>{c}</h3>{products.filter(p=>p.cat===c&&p.active).map(p=><button className="product" key={p.id} onClick={()=>addProduct(p)}><span>{p.name}</span><b>{BRL(p.price)}</b></button>)}</div>)}</div></section><section className="panel ticket"><h2>Pedido atual</h2>{cart.length===0&&<p className="muted">Escolha os produtos do cardápio.</p>}{cart.map(i=><div className="cartitem" key={i.uid}><div className="row"><b>{i.product.name}</b><button className="ghost dangerText" onClick={()=>setCart(cart.filter(x=>x.uid!==i.uid))}>remover</button></div>{i.product.name.toLowerCase().includes('cuscuz base')&&<small>{Math.min(i.adds.length,3)}/3 adicionais grátis • depois cobra automático</small>}{i.product.name.toLowerCase().includes('cuscuz premium')&&<small>Produto fechado: carne seca, queijo e queijo coalho inclusos.</small>}{!i.product.name.toLowerCase().includes('cuscuz premium')&&<div className="chips">{adds.filter(a=>!(i.product.name.toLowerCase().includes('cuscuz base') && a.name.toLowerCase().includes('carne seca'))).map(a=><button key={a.id} className={i.adds.find(x=>x.id===a.id)?'chip on':'chip'} onClick={()=>toggleAdd(i.uid,a)}>{a.name} {i.product.name.toLowerCase().includes('cuscuz base')?'':`+ ${BRL(a.price)}`}</button>)}</div>}<b className="totalitem">{BRL(calcItem(i))}</b></div>)}<h2>Total: {BRL(subtotal)}</h2><button className="primary big" onClick={createOrder}>Salvar como pedido aberto</button></section></main>}
-  {tab==='pedidos'&&<><Dashboard orders={orders} done={done} day={day}/><main className="orders">{orders.length===0&&<section className="panel"><h2>Nenhum pedido ainda</h2></section>}{orders.map(o=><Order key={o.id} o={o} update={update} cancel={cancel} receiptSettings={receiptSettings}/>)}</main></>}
+  {tab==='pedidos'&&<><Dashboard orders={orders} done={done} day={day}/><main className="orders">{orders.filter(o=>!['concluido','cancelado'].includes(o.status)).length===0&&<section className="panel"><h2>Nenhum pedido ativo</h2><p className="muted">Pedidos concluídos ficam na aba Finalizados.</p></section>}{orders.filter(o=>!['concluido','cancelado'].includes(o.status)).map(o=><Order key={o.id} o={o} update={update} cancel={cancel} receiptSettings={receiptSettings}/>)}</main></>}
+  {tab==='finalizados'&&<Finalizados orders={orders} update={update} receiptSettings={receiptSettings}/>}
   {tab==='cozinha'&&<Kitchen orders={orders} update={update}/>}
   {tab==='financeiro'&&<Financeiro day={day} done={done} orders={orders} open={open} setOpenStore={setOpenStore} cashOpen={cashOpen} cashClose={cashClose} setCashOpen={v=>{setCashOpen(v);store.set('vh_cash_open',v)}} setCashClose={v=>{setCashClose(v);store.set('vh_cash_close',v)}} receiptSettings={receiptSettings}/>} 
   {tab==='cardapio'&&<Cardapio products={products} saveProducts={saveProducts} adds={adds} saveAdds={saveAdds}/>}
@@ -362,6 +363,35 @@ function prepClock(date, now){
  const mm = String(Math.floor(remaining/60)).padStart(2,'0');
  const ss = String(remaining%60).padStart(2,'0');
  return {elapsed,remaining,label:`${mm}:${ss}`};
+}
+
+
+function Finalizados({orders,update,receiptSettings}){
+ const finished=orders.filter(o=>['concluido','cancelado'].includes(o.status));
+ const grouped=finished.reduce((acc,o)=>{
+   const key=localDateKey(o.date);
+   acc[key]=acc[key]||[];
+   acc[key].push(o);
+   return acc;
+ },{});
+ const keys=Object.keys(grouped).sort((a,b)=>b.localeCompare(a));
+ return <main className="orders finishedOrders">
+  {finished.length===0&&<section className="panel"><h2>Nenhum pedido finalizado</h2><p className="muted">Quando concluir ou cancelar um pedido, ele aparece aqui.</p></section>}
+  {keys.map(key=><section className="panel finishedDay" key={key}>
+    <div className="row"><h2>{brDateFromKey(key)}</h2><span className="badge">{grouped[key].length} pedido(s)</span></div>
+    {grouped[key].map(o=>{
+      const total=calcOrder(o);
+      return <div className={'finishedCard '+o.status} key={o.id}>
+        <div className="row"><div><b>#{o.num} • {o.customer}</b><p className="muted">{new Date(o.date).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})} • {o.status}</p></div><b>{BRL(total)}</b></div>
+        <div className="finishedItems">{(o.items||[]).map((i,k)=><span key={k}>{i.qty||1}x {i.product.name}</span>)}</div>
+        <div className="actions">
+          <button onClick={()=>openPrint(orderReceipt(o,total,receiptSettings),'order')}>Reimprimir pedido</button>
+          {o.status==='concluido'&&<button className="ghost" onClick={()=>update(o.id,{status:'aberto'})}>Voltar para ativos</button>}
+        </div>
+      </div>
+    })}
+  </section>)}
+ </main>;
 }
 
 function Kitchen({orders,update}){
