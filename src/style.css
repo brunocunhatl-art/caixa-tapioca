@@ -20,3 +20,4 @@
 .coupon-row{display:flex;gap:8px;align-items:center}.coupon-row input{flex:1}.checkout.collapsed{position:sticky;top:90px}.ok{color:#14853d}.warn{color:#b42318}
 
 .kitchenOrder.late{border:2px solid #b42318}.badge.danger{background:#b42318;color:#fff}
+.receiptPreview{background:#fff;color:#000;border:1px solid #d0d5dd;border-radius:18px;padding:12px;max-width:360px;overflow:auto}.receiptPreview .receipt80{transform:scale(.9);transform-origin:top left;margin:0}.storeControls input{min-width:160px}

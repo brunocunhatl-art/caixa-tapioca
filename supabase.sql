@@ -33,16 +33,34 @@ create table if not exists public.store_settings (
   is_open boolean not null default true,
   estimated_minutes integer not null default 25,
   message text default 'Estamos recebendo pedidos normalmente.',
+  whatsapp_number text default '5567993248754',
   updated_at timestamptz not null default now()
 );
 
-insert into public.store_settings (id, is_open, estimated_minutes, message)
-values ('main', true, 25, 'Estamos recebendo pedidos normalmente.')
+alter table public.store_settings add column if not exists whatsapp_number text default '5567993248754';
+
+insert into public.store_settings (id, is_open, estimated_minutes, message, whatsapp_number)
+values ('main', true, 25, 'Estamos recebendo pedidos normalmente.', '5567993248754')
+on conflict (id) do nothing;
+
+create table if not exists public.receipt_settings (
+  id text primary key default 'main',
+  name text not null default 'Verbo Hub',
+  document text default '',
+  phone text default '',
+  address text default '',
+  footer text default 'Obrigado pela preferência!',
+  updated_at timestamptz not null default now()
+);
+
+insert into public.receipt_settings (id, name, footer)
+values ('main', 'Verbo Hub', 'Obrigado pela preferência!')
 on conflict (id) do nothing;
 
 alter table public.orders enable row level security;
 alter table public.store_settings enable row level security;
 alter table public.coupons enable row level security;
+alter table public.receipt_settings enable row level security;
 
 do $$
 begin
@@ -88,6 +106,7 @@ create table if not exists public.menu_items (
 );
 
 alter table public.menu_items enable row level security;
+alter table public.receipt_settings enable row level security;
 
 do $$
 begin
@@ -180,12 +199,16 @@ DROP POLICY IF EXISTS coupons_write_public ON public.coupons;
 DROP POLICY IF EXISTS menu_items_read_public ON public.menu_items;
 DROP POLICY IF EXISTS menu_items_write_public ON public.menu_items;
 DROP POLICY IF EXISTS menu_items_read_active_public ON public.menu_items;
+DROP POLICY IF EXISTS receipt_settings_read_public ON public.receipt_settings;
+DROP POLICY IF EXISTS receipt_settings_write_public ON public.receipt_settings;
 DROP POLICY IF EXISTS coupons_read_active_public ON public.coupons;
 
 alter table public.orders enable row level security;
 alter table public.store_settings enable row level security;
 alter table public.coupons enable row level security;
+alter table public.receipt_settings enable row level security;
 alter table public.menu_items enable row level security;
+alter table public.receipt_settings enable row level security;
 
 -- Cardapio publico: pode criar pedido, ler configuracao da loja, ler produtos/cupons ativos.
 create policy orders_insert_public on public.orders
@@ -203,6 +226,10 @@ create policy coupons_read_active_public on public.coupons
 create policy menu_items_read_active_public on public.menu_items
   for select to anon, authenticated
   using (active = true);
+
+create policy receipt_settings_read_public on public.receipt_settings
+  for select to anon, authenticated
+  using (true);
 
 -- Produto mais vendido do dia sem expor lista completa de pedidos ao cliente
 create or replace function public.get_best_seller_today()
@@ -411,18 +438,71 @@ as $$
 declare saved public.store_settings;
 begin
   if not public.is_verbo_admin(admin_key) then raise exception 'Acesso negado'; end if;
-  insert into public.store_settings(id, is_open, estimated_minutes, message, updated_at)
+  insert into public.store_settings(id, is_open, estimated_minutes, message, whatsapp_number, updated_at)
   values (
     'main',
     coalesce((settings->>'is_open')::boolean, true),
     coalesce((settings->>'estimated_minutes')::integer, 25),
     coalesce(settings->>'message', 'Estamos recebendo pedidos normalmente.'),
+    coalesce(nullif(regexp_replace(settings->>'whatsapp_number', '\D', '', 'g'), ''), '5567993248754'),
     now()
   )
   on conflict(id) do update set
     is_open = excluded.is_open,
     estimated_minutes = excluded.estimated_minutes,
     message = excluded.message,
+    whatsapp_number = excluded.whatsapp_number,
+    updated_at = now()
+  returning * into saved;
+  return saved;
+end;
+$$;
+
+
+create or replace function public.admin_get_receipt_settings(admin_key text)
+returns public.receipt_settings
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare cfg public.receipt_settings;
+begin
+  if not public.is_verbo_admin(admin_key) then raise exception 'Acesso negado'; end if;
+  select * into cfg from public.receipt_settings where id = 'main';
+  if cfg is null then
+    insert into public.receipt_settings(id, name, footer)
+    values ('main','Verbo Hub','Obrigado pela preferência!')
+    returning * into cfg;
+  end if;
+  return cfg;
+end;
+$$;
+
+create or replace function public.admin_save_receipt_settings(admin_key text, settings jsonb)
+returns public.receipt_settings
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare saved public.receipt_settings;
+begin
+  if not public.is_verbo_admin(admin_key) then raise exception 'Acesso negado'; end if;
+  insert into public.receipt_settings(id, name, document, phone, address, footer, updated_at)
+  values (
+    'main',
+    coalesce(nullif(trim(settings->>'name'), ''), 'Verbo Hub'),
+    coalesce(settings->>'document', ''),
+    coalesce(settings->>'phone', ''),
+    coalesce(settings->>'address', ''),
+    coalesce(nullif(trim(settings->>'footer'), ''), 'Obrigado pela preferência!'),
+    now()
+  )
+  on conflict(id) do update set
+    name = excluded.name,
+    document = excluded.document,
+    phone = excluded.phone,
+    address = excluded.address,
+    footer = excluded.footer,
     updated_at = now()
   returning * into saved;
   return saved;
@@ -439,3 +519,5 @@ grant execute on function public.admin_list_coupons(text) to anon, authenticated
 grant execute on function public.admin_upsert_coupon(text, jsonb) to anon, authenticated;
 grant execute on function public.admin_delete_coupon(text, uuid) to anon, authenticated;
 grant execute on function public.admin_save_store_settings(text, jsonb) to anon, authenticated;
+grant execute on function public.admin_get_receipt_settings(text) to anon, authenticated;
+grant execute on function public.admin_save_receipt_settings(text, jsonb) to anon, authenticated;
